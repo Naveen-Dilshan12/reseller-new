@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+.env.production
+apps/backend/uploads/
+coverage/
+.DS_Store
+.local/
+.next/
+next-env.d.ts
+*.log
+.env.*.local

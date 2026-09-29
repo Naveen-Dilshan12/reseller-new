@@ -1,0 +1,724 @@
+// Hexalyte Central Reseller Platform
+//
+// This database only holds reseller-side data. Each SaaS product stays the
+// source of truth for tenants, users, trials, plans, subscriptions and payments.
+// Fields prefixed `saas` or `lastKnown` are references or cached snapshots.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity & access ────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  FINANCE
+  RESELLER_ADMIN
+  RESELLER_AGENT
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id               String     @id @default(cuid())
+  email            String     @unique
+  passwordHash     String
+  name             String
+  phone            String?
+  role             UserRole
+  status           UserStatus @default(ACTIVE)
+  resellerId       String?
+  failedLoginCount Int        @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  reseller      Reseller?      @relation(fields: [resellerId], references: [id])
+  refreshTokens RefreshToken[]
+  notifications Notification[]
+
+  @@index([resellerId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip        String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─── Resellers ────────────────────────────────────────────────────────────────
+
+enum ResellerStatus {
+  /// Application submitted, awaiting admin review. Users cannot log in.
+  PENDING
+  ACTIVE
+  /// Application rejected. Users cannot log in.
+  REJECTED
+  SUSPENDED
+  TERMINATED
+}
+
+/// A reseller company. Created by the public registration form in PENDING
+/// status and only usable after an admin approves the application.
+model Reseller {
+  id                     String         @id @default(cuid())
+  code                   String         @unique
+
+  // Personal details (primary contact / applicant)
+  fullName               String
+  nicOrPassport          String         @unique
+  email                  String
+  mobile                 String
+  address                String
+
+  // Business details
+  businessName           String
+  businessRegistrationNo String         @unique
+  businessAddress        String
+  businessPhone          String
+  businessEmail          String
+
+  status                 ResellerStatus @default(PENDING)
+  /// Cached from CommissionLevel whenever a customer's subscription status changes.
+  currentLevel           Int?
+  activeCustomerCount    Int            @default(0)
+  levelUpdatedAt         DateTime?
+  submittedAt            DateTime       @default(now())
+  reviewedAt             DateTime?
+  reviewedById           String?
+  rejectionReason        String?
+  reviewNote             String?
+  approvedAt             DateTime?
+  suspendedAt            DateTime?
+  /// Internal; the reseller only sees that the account is suspended.
+  suspensionReason       String?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  bankAccount        ResellerBankAccount?
+  users              User[]
+  productAccess      ResellerProductAccess[]
+  customers          Customer[]
+  accounts           CustomerAccount[]
+  trialRequests      TrialRequest[]
+  activationRequests ActivationRequest[]
+  bankSlips          BankSlip[]
+  commissions        Commission[]
+  levelChanges       ResellerLevelChange[]
+  payouts            CommissionPayout[]
+
+  @@index([status, submittedAt])
+  @@map("resellers")
+}
+
+/// Payout bank account. The full account number is only stored encrypted
+/// (AES-256-GCM); APIs return the masked form unless explicitly revealed.
+model ResellerBankAccount {
+  id                     String   @id @default(cuid())
+  resellerId             String   @unique
+  bankName               String
+  branch                 String
+  accountHolderName      String
+  accountNumberEncrypted String
+  accountNumberLast4     String
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  reseller Reseller @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+
+  @@map("reseller_bank_accounts")
+}
+
+// ─── SaaS products & integration ──────────────────────────────────────────────
+
+enum SaasProductStatus {
+  ACTIVE
+  INACTIVE
+  COMING_SOON
+}
+
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  /// Saved but not yet verified by a health check (or manual fulfilment).
+  CONFIGURED
+  CONNECTED
+  ERROR
+  DISABLED
+}
+
+/// Catalogue entry for an existing Hexalyte SaaS. Safe to show to resellers;
+/// connection details live in SaasIntegrationConfig.
+model SaasProduct {
+  id                String            @id @default(cuid())
+  code              String            @unique
+  name              String
+  description       String?
+  status            SaasProductStatus @default(INACTIVE)
+  /// Reference monthly price; commissions are calculated on it. Billing stays in the SaaS.
+  monthlyPrice      Decimal           @default(5500) @db.Decimal(12, 2)
+  currency          String            @default("LKR")
+  trialAvailable    Boolean           @default(false)
+  trialDays         Int?
+  integrationStatus IntegrationStatus @default(NOT_CONFIGURED)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  integration        SaasIntegrationConfig?
+  resellerAccess     ResellerProductAccess[]
+  accounts           CustomerAccount[]
+  trialRequests      TrialRequest[]
+  activationRequests ActivationRequest[]
+  commissions        Commission[]
+  integrationLogs    IntegrationLog[]
+  webhookEvents      WebhookEvent[]
+
+  @@index([status])
+  @@map("saas_products")
+}
+
+/// Server-side only: never include this model in a reseller-facing query.
+/// Secrets are AES-256-GCM encrypted and are write-only through the API.
+model SaasIntegrationConfig {
+  id                     String    @id @default(cuid())
+  productId              String    @unique
+  /// Key of the integration implementation in the provider registry, e.g. MOBILE_SHOP.
+  provider               String
+  baseUrl                String?
+  apiKeyEncrypted        String?
+  /// HMAC secret for signing outbound requests and verifying inbound webhooks.
+  signingSecretEncrypted String?
+  lastCheckedAt          DateTime?
+  lastCheckOk            Boolean?
+  lastError              String?
+  updatedById            String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  product SaasProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("saas_integration_configs")
+}
+
+enum ResellerAccessStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+/// Which SaaS products a reseller may sell.
+model ResellerProductAccess {
+  id              String               @id @default(cuid())
+  resellerId      String
+  productId       String
+  status          ResellerAccessStatus @default(ACTIVE)
+  note            String?
+  grantedById     String?
+  statusChangedAt DateTime             @default(now())
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  reseller Reseller    @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+  product  SaasProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([resellerId, productId])
+  @@index([productId, status])
+  @@map("reseller_product_access")
+}
+
+enum IntegrationOperation {
+  CREATE_TRIAL
+  LOOKUP_TENANT
+  GET_ACCOUNT_STATUS
+  REQUEST_ACTIVATION
+  GET_ACTIVATION_STATUS
+  HEALTH_CHECK
+}
+
+model IntegrationLog {
+  id           String               @id @default(cuid())
+  productId    String
+  operation    IntegrationOperation
+  entityId     String?
+  success      Boolean
+  httpStatus   Int?
+  durationMs   Int?
+  errorMessage String?
+  createdAt    DateTime             @default(now())
+
+  product SaasProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, createdAt])
+  @@map("integration_logs")
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  productId   String
+  eventId     String
+  type        String
+  payload     Json
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+
+  product SaasProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, eventId])
+  @@map("webhook_events")
+}
+
+// ─── Customer / account mapping ───────────────────────────────────────────────
+
+/// A client business brought in by a reseller. Only the reseller's own
+/// reference label is stored; the business's data lives in each SaaS.
+model Customer {
+  id          String   @id @default(cuid())
+  resellerId  String
+  displayName String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reseller Reseller          @relation(fields: [resellerId], references: [id])
+  accounts CustomerAccount[]
+
+  @@index([resellerId])
+  @@map("customers")
+}
+
+/// Reseller-side status, driven by verified SaaS outcomes (SubscriptionEvent).
+enum CustomerAccountStatus {
+  /// Mapping created; tenant not provisioned in the SaaS yet.
+  PENDING
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+/// Minimal mapping between a reseller's customer and a tenant in one SaaS.
+/// No SaaS business data (customers, sales, inventory, …) is copied here.
+model CustomerAccount {
+  id                String                @id @default(cuid())
+  resellerId        String
+  customerId        String
+  productId         String
+  externalTenantId  String?
+  externalAccountId String?
+  /// Only ACTIVE accounts count towards the reseller's level.
+  status            CustomerAccountStatus @default(PENDING)
+  activatedAt       DateTime?
+  deactivatedAt     DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  reseller           Reseller            @relation(fields: [resellerId], references: [id])
+  customer           Customer            @relation(fields: [customerId], references: [id])
+  product            SaasProduct         @relation(fields: [productId], references: [id])
+  trialRequests      TrialRequest[]
+  activationRequests ActivationRequest[]
+  subscriptionEvents SubscriptionEvent[]
+  commissions        Commission[]
+
+  @@unique([productId, externalTenantId])
+  @@unique([customerId, productId])
+  @@index([resellerId, status])
+  @@map("customer_accounts")
+}
+
+// ─── Trial requests ───────────────────────────────────────────────────────────
+
+enum TrialRequestStatus {
+  PENDING
+  SUBMITTED
+  PROVISIONED
+  FAILED
+  CANCELLED
+}
+
+/// A reseller's request for the SaaS to create a trial tenant. The owner's
+/// contact details are forwarded to the SaaS and never stored here.
+model TrialRequest {
+  id                String             @id @default(cuid())
+  resellerId        String
+  productId         String
+  customerAccountId String
+  status            TrialRequestStatus @default(PENDING)
+  notes             String?
+  /// Idempotency-Key of the current attempt; the SaaS also dedupes on the CustomerAccount id (externalRef).
+  idempotencyKey    String             @unique
+  attempts          Int                @default(0)
+  saasReference     String?
+  errorMessage      String?
+  /// True when the failure may be transient (timeout, 5xx) and the tenant might exist.
+  errorRetryable    Boolean?
+  submittedAt       DateTime?
+  completedAt       DateTime?
+  requestedById     String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  reseller        Reseller        @relation(fields: [resellerId], references: [id])
+  product         SaasProduct     @relation(fields: [productId], references: [id])
+  customerAccount CustomerAccount @relation(fields: [customerAccountId], references: [id])
+
+  @@index([resellerId, status])
+  @@map("trial_requests")
+}
+
+// ─── Subscription activation requests ─────────────────────────────────────────
+
+enum ActivationRequestStatus {
+  PENDING_REVIEW
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  ACTIVATION_COMPLETED
+  /// Withdrawn by the reseller before review started.
+  CANCELLED
+}
+
+enum ActivationMethod {
+  /// Activated by calling the SaaS partner API.
+  PARTNER_API
+  /// Activated by staff in the SaaS's own admin console, then confirmed here.
+  MANUAL
+}
+
+/// A reseller asks Hexalyte to activate a paid subscription after the customer
+/// paid by bank transfer. Hexalyte staff verify the payment; the subscription
+/// itself is activated by the SaaS. Resellers can never approve or activate.
+model ActivationRequest {
+  id                      String                  @id @default(cuid())
+  /// Human-readable reference, e.g. AR-7K2F9Q; sent to the SaaS as externalRef.
+  reference               String                  @unique
+  resellerId              String
+  productId               String
+  customerAccountId       String
+  status                  ActivationRequestStatus @default(PENDING_REVIEW)
+  /// Billing month the payment covers (YYYY-MM).
+  periodMonth             String
+  amount                  Decimal                 @db.Decimal(12, 2)
+  currency                String                  @default("LKR")
+  payerName               String
+  payerBank               String?
+  transactionRef          String
+  transferDate            DateTime                @db.Date
+  notes                   String?
+  requestedById           String
+  submittedAt             DateTime                @default(now())
+
+  reviewerId              String?
+  reviewStartedAt         DateTime?
+  paymentVerifiedAt       DateTime?
+  paymentVerifiedById     String?
+  /// Internal: how the payment was checked (bank statement line, etc.).
+  paymentVerificationNote String?
+  decidedAt               DateTime?
+  decidedById             String?
+  rejectionReason         String?
+
+  activationMethod        ActivationMethod?
+  idempotencyKey          String?                 @unique
+  activationAttempts      Int                     @default(0)
+  saasRequestId           String?
+  /// Subscription / invoice reference in the SaaS.
+  activationReference     String?
+  activationError         String?
+  activationNote          String?
+  activatedAt             DateTime?
+  activatedById           String?
+  cancelledAt             DateTime?
+  subscriptionEventId     String?                 @unique
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+
+  reseller          Reseller                 @relation(fields: [resellerId], references: [id])
+  product           SaasProduct              @relation(fields: [productId], references: [id])
+  customerAccount   CustomerAccount          @relation(fields: [customerAccountId], references: [id])
+  subscriptionEvent SubscriptionEvent?       @relation(fields: [subscriptionEventId], references: [id])
+  bankSlips         BankSlip[]
+  history           ActivationStatusChange[]
+
+  @@index([status, submittedAt])
+  @@index([resellerId, status])
+  @@index([customerAccountId, periodMonth])
+  @@index([productId, saasRequestId])
+  @@map("activation_requests")
+}
+
+/// Timeline of an activation request; every status change and review step.
+model ActivationStatusChange {
+  id                  String                   @id @default(cuid())
+  activationRequestId String
+  fromStatus          ActivationRequestStatus?
+  toStatus            ActivationRequestStatus
+  action              String
+  /// Visible to the reseller only when `internal` is false.
+  note                String?
+  internal            Boolean                  @default(false)
+  actorUserId         String?
+  createdAt           DateTime                 @default(now())
+
+  activationRequest ActivationRequest @relation(fields: [activationRequestId], references: [id], onDelete: Cascade)
+
+  @@index([activationRequestId, createdAt])
+  @@map("activation_status_changes")
+}
+
+// ─── Bank slips ───────────────────────────────────────────────────────────────
+
+/// Metadata of an uploaded bank slip. The file is AES-256-GCM encrypted in
+/// private storage (UPLOAD_DIR, never served statically) and is only returned
+/// by an authorised, audited endpoint.
+model BankSlip {
+  id                  String   @id @default(cuid())
+  resellerId          String
+  activationRequestId String
+  storageKey          String   @unique
+  originalName        String
+  mimeType            String
+  sizeBytes           Int
+  /// SHA-256 of the original file; used to flag the same slip reused elsewhere.
+  sha256              String
+  uploadedById        String
+  createdAt           DateTime @default(now())
+
+  reseller          Reseller          @relation(fields: [resellerId], references: [id])
+  activationRequest ActivationRequest @relation(fields: [activationRequestId], references: [id])
+
+  @@index([activationRequestId])
+  @@index([sha256])
+  @@map("bank_slips")
+}
+
+// ─── Commission ───────────────────────────────────────────────────────────────
+
+/// Level tiers by number of ACTIVE customers. Seeded; editable without code changes.
+model CommissionLevel {
+  level              Int      @id
+  name               String
+  minActiveCustomers Int
+  /// Null means no upper bound.
+  maxActiveCustomers Int?
+  ratePercent        Decimal  @db.Decimal(5, 2)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@map("commission_levels")
+}
+
+model ResellerLevelChange {
+  id                  String   @id @default(cuid())
+  resellerId          String
+  fromLevel           Int?
+  toLevel             Int?
+  activeCustomerCount Int
+  createdAt           DateTime @default(now())
+
+  reseller Reseller @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+
+  @@index([resellerId, createdAt])
+  @@map("reseller_level_changes")
+}
+
+enum SubscriptionEventType {
+  /// Subscription payment for `periodMonth` verified and the SaaS account is active.
+  PAYMENT_VERIFIED
+  /// Subscription ended without refund; already-earned commission is kept.
+  CANCELLED
+  /// Payment for `periodMonth` refunded; that month's commission is reversed.
+  REFUNDED
+}
+
+enum SubscriptionEventSource {
+  ADMIN
+  SAAS_WEBHOOK
+  ACTIVATION_REQUEST
+}
+
+/// Verified subscription outcomes reported by the SaaS (or recorded by an
+/// admin for products without a partner API). Commissions are derived from these.
+model SubscriptionEvent {
+  id                String                  @id @default(cuid())
+  customerAccountId String
+  type              SubscriptionEventType
+  /// Billing month in YYYY-MM (Asia/Colombo).
+  periodMonth       String
+  externalRef       String?
+  source            SubscriptionEventSource
+  note              String?
+  recordedById      String?
+  createdAt         DateTime                @default(now())
+
+  customerAccount   CustomerAccount    @relation(fields: [customerAccountId], references: [id])
+  commissions       Commission[]
+  activationRequest ActivationRequest?
+
+  @@unique([customerAccountId, type, periodMonth])
+  @@index([customerAccountId, createdAt])
+  @@map("subscription_events")
+}
+
+enum CommissionEntryType {
+  /// Monthly commission for one active customer.
+  EARNING
+  /// Negative entry recovering a commission that was already paid.
+  CLAWBACK
+}
+
+enum CommissionStatus {
+  /// Generated after verified payment; awaiting admin approval.
+  PENDING
+  /// Approved; still inside the refund hold period.
+  APPROVED
+  /// Approved and hold period over; included in the next payout.
+  PAYABLE
+  PAID
+  /// Cancelled before payment (refund, chargeback or admin correction).
+  REVERSED
+}
+
+/// Commission ledger. EARNING rows snapshot the level and rate used, so later
+/// level changes never alter historical amounts.
+model Commission {
+  id                  String              @id @default(cuid())
+  resellerId          String
+  productId           String
+  customerAccountId   String
+  subscriptionEventId String?
+  entryType           CommissionEntryType @default(EARNING)
+  periodMonth         String
+  level               Int
+  baseAmount          Decimal             @db.Decimal(12, 2)
+  rate                Decimal             @db.Decimal(5, 2)
+  amount              Decimal             @db.Decimal(12, 2)
+  currency            String              @default("LKR")
+  status              CommissionStatus    @default(PENDING)
+  /// End of the refund hold period; APPROVED becomes PAYABLE after this.
+  payableAt           DateTime
+  approvedById        String?
+  approvedAt          DateTime?
+  payoutId            String?
+  paidAt              DateTime?
+  reversedAt          DateTime?
+  reversedById        String?
+  reversalReason      String?
+  /// For CLAWBACK rows: the paid EARNING row being recovered.
+  reversalOfId        String?             @unique
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  reseller          Reseller           @relation(fields: [resellerId], references: [id])
+  product           SaasProduct        @relation(fields: [productId], references: [id])
+  customerAccount   CustomerAccount    @relation(fields: [customerAccountId], references: [id])
+  subscriptionEvent SubscriptionEvent? @relation(fields: [subscriptionEventId], references: [id])
+  payout            CommissionPayout?  @relation(fields: [payoutId], references: [id])
+  reversalOf        Commission?        @relation("Clawback", fields: [reversalOfId], references: [id])
+  clawback          Commission?        @relation("Clawback")
+
+  @@index([resellerId, status])
+  @@index([resellerId, periodMonth])
+  @@index([customerAccountId, periodMonth])
+  @@index([status, payableAt])
+  @@map("commissions")
+}
+
+/// One bank transfer to a reseller settling a set of PAYABLE ledger rows.
+model CommissionPayout {
+  id               String   @id @default(cuid())
+  resellerId       String
+  totalAmount      Decimal  @db.Decimal(12, 2)
+  currency         String   @default("LKR")
+  paymentReference String
+  paidAt           DateTime
+  paidById         String
+  note             String?
+  createdAt        DateTime @default(now())
+
+  reseller    Reseller     @relation(fields: [resellerId], references: [id])
+  commissions Commission[]
+
+  @@index([resellerId, paidAt])
+  @@map("commission_payouts")
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ─── Platform settings ────────────────────────────────────────────────────────
+
+/// Admin-editable settings (e.g. company bank details shown to resellers).
+/// Every change is audited with the previous and new value.
+model PlatformSetting {
+  key         String   @id
+  value       String
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("platform_settings")
+}
+
+// ─── Audit log ────────────────────────────────────────────────────────────────
+
+enum AuditActorType {
+  USER
+  SYSTEM
+  SAAS
+}
+
+model AuditLog {
+  id          String         @id @default(cuid())
+  actorType   AuditActorType
+  actorUserId String?
+  actorEmail  String?
+  action      String
+  entityType  String
+  entityId    String?
+  resellerId  String?
+  ip          String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime       @default(now())
+
+  @@index([entityType, entityId])
+  @@index([resellerId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

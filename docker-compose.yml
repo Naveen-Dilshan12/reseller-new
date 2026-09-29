@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reseller}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reseller}
+      POSTGRES_DB: ${POSTGRES_DB:-hexalyte_reseller}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - reseller_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reseller}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ./apps/backend/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-reseller}:${POSTGRES_PASSWORD:-reseller}@postgres:5432/${POSTGRES_DB:-hexalyte_reseller}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-4100}:4100"
+    volumes:
+      - reseller_uploads:/app/uploads
+
+volumes:
+  reseller_pg:
+  reseller_uploads:
