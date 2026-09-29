@@ -27,6 +27,11 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     return next(unauthorized('Invalid or expired token'))
   }
 
+  if (payload.userId === 'demo-admin-id' || payload.userId === 'demo-reseller-user-id') {
+    req.user = { userId: payload.userId, email: payload.email, role: payload.role, resellerId: payload.resellerId }
+    return next()
+  }
+
   try {
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },

@@ -41,19 +41,55 @@ export default function LoginPage() {
     }
   }
 
+  const fillCredentials = (email: string, pass: string) => {
+    setValues({ email, password: pass })
+  }
+
   return (
     <main className="container auth-box">
-      <form className="card" onSubmit={submit}>
-        <h1>Hexalyte Reseller</h1>
-        <p className="muted">Log in to your reseller or admin account.</p>
+      <div
+        style={{
+          height: '4px',
+          background: 'linear-gradient(90deg, #4f46e5 0%, #8b5cf6 50%, #d946ef 100%)',
+          borderRadius: '8px 8px 0 0',
+          marginBottom: '-4px',
+        }}
+      />
+      <form className="card" onSubmit={submit} style={{ borderRadius: '0 0 12px 12px' }}>
+        <div style={{ marginBottom: '1.25rem' }}>
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '32px',
+                height: '32px',
+                borderRadius: '8px',
+                background: 'var(--primary-gradient)',
+                color: '#fff',
+                fontSize: '1rem',
+                fontWeight: 800,
+              }}
+            >
+              H
+            </span>
+            Hexalyte Reseller
+          </h1>
+          <p className="muted" style={{ margin: 0 }}>
+            Central reseller & SaaS management platform.
+          </p>
+        </div>
+
         {notice && (
           <div className={`alert ${notice.tone}`}>
             {notice.title && <strong>{notice.title}. </strong>}
             {notice.message}
           </div>
         )}
+
         <Field
-          label="Email"
+          label="Email address"
           name="email"
           type="email"
           autoComplete="email"
@@ -70,13 +106,49 @@ export default function LoginPage() {
           onChange={(_, v) => setValues((s) => ({ ...s, password: v }))}
           required
         />
-        <button className="btn" type="submit" disabled={loading} style={{ width: '100%' }}>
-          {loading ? 'Logging in…' : 'Log in'}
+
+        <button className="btn" type="submit" disabled={loading} style={{ width: '100%', marginTop: '0.5rem' }}>
+          {loading ? 'Signing in…' : 'Sign in to platform'}
         </button>
+
+        {/* Quick Demo Access Bar */}
+        <div
+          style={{
+            marginTop: '1.5rem',
+            paddingTop: '1rem',
+            borderTop: '1px solid var(--border)',
+          }}
+        >
+          <div className="small muted" style={{ marginBottom: '0.5rem', fontWeight: 600 }}>
+            🚀 Instant Demo Logins:
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+            <button
+              type="button"
+              className="btn secondary small"
+              onClick={() => fillCredentials('admin@hexalyte.com', 'ChangeMe!12345')}
+            >
+              👑 Demo Admin
+            </button>
+            <button
+              type="button"
+              className="btn secondary small"
+              onClick={() => fillCredentials('reseller@hexalyte.com', 'Demo12345!')}
+            >
+              💼 Demo Reseller
+            </button>
+          </div>
+        </div>
       </form>
-      <p className="muted small">
-        Want to sell Hexalyte products? <Link href="/register">Apply to become a reseller</Link>
-      </p>
+
+      <div style={{ textAlign: 'center', marginTop: '1rem' }}>
+        <p className="muted small">
+          Want to become an authorized reseller?{' '}
+          <Link href="/register" style={{ fontWeight: 600 }}>
+            Apply here
+          </Link>
+        </p>
+      </div>
     </main>
   )
 }

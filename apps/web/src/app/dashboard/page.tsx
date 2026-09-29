@@ -58,20 +58,35 @@ function presetRange(preset: Preset): { from: string; to: string } {
 // ─── Small building blocks ───────────────────────────────────────────────────
 
 function Kpi({ label, value, hint, href, tone }: { label: string; value: React.ReactNode; hint?: React.ReactNode; href?: string; tone?: 'primary' | 'warning' }) {
+  const accent = tone === 'primary' ? 'linear-gradient(90deg, #4f46e5, #8b5cf6)' : tone === 'warning' ? '#f59e0b' : '#6366f1'
   const body = (
-    <>
-      <div className="kpi-label">{label}</div>
-      <div className="kpi-value">{value}</div>
-      {hint && <div className="kpi-hint">{hint}</div>}
-    </>
+    <div
+      style={{
+        position: 'relative',
+        background: '#0f1523',
+        borderRadius: '16px',
+        padding: '1.35rem 1.45rem',
+        border: '1px solid rgba(255, 255, 255, 0.08)',
+        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.4)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.4rem',
+        overflow: 'hidden',
+        transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+      }}
+    >
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '3px', background: accent, boxShadow: tone === 'primary' ? '0 0 10px rgba(99, 102, 241, 0.5)' : undefined }} />
+      <div className="kpi-label" style={{ fontSize: '0.74rem', letterSpacing: '0.05em', color: '#94a3b8', fontWeight: 700 }}>{label}</div>
+      <div className="kpi-value" style={{ fontSize: '1.75rem', fontWeight: 800, color: tone === 'primary' ? '#a5b4fc' : '#ffffff', letterSpacing: '-0.02em' }}>{value}</div>
+      {hint && <div className="kpi-hint" style={{ fontSize: '0.78rem', color: '#64748b' }}>{hint}</div>}
+    </div>
   )
-  const className = `card kpi ${tone ?? ''}`
   return href ? (
-    <Link href={href} className={`${className} kpi-link`}>
+    <Link href={href} style={{ textDecoration: 'none' }} className="kpi-link">
       {body}
     </Link>
   ) : (
-    <div className={className}>{body}</div>
+    body
   )
 }
 

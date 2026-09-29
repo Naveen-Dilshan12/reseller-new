@@ -56,8 +56,11 @@ app.get('/health', async (_req, res) => {
   }
 })
 
+import { demoMiddleware } from './middleware/demo.middleware'
+
 const api = express.Router()
 api.use(globalLimiter)
+api.use(demoMiddleware)
 api.use((_req, res, next) => {
   // Responses contain personal and banking data; never cache them.
   res.set('Cache-Control', 'no-store')
