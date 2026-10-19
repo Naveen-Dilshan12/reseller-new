@@ -18,6 +18,7 @@ export class MobileShopIntegration extends PartnerApiIntegration {
       ownerName: input.contactName,
       ownerEmail: input.contactEmail,
       phone: input.contactPhone,
+      ...(input.password ? { password: input.password } : {}),
     }
   }
 

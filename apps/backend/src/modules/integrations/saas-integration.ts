@@ -23,6 +23,7 @@ export interface CreateTrialInput {
   contactName: string
   contactEmail: string
   contactPhone: string
+  password?: string
 }
 
 export interface TenantIdentity {

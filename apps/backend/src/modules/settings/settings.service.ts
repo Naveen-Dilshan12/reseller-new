@@ -6,7 +6,21 @@ import { getLevels, recalculateResellerLevel } from '../commissions/level.servic
 import { notificationService } from '../notifications/notification.service'
 import type { UpdateLevelsInput } from './settings.schema'
 
-export const SETTING_KEYS = { COMPANY_BANK_DETAILS: 'COMPANY_BANK_DETAILS' } as const
+export const SETTING_KEYS = {
+  COMPANY_BANK_DETAILS: 'COMPANY_BANK_DETAILS',
+  // Appearance (see appearance.service.ts). The two image settings hold a private-storage key, never a URL.
+  APPEARANCE_HERO_IMAGE: 'APPEARANCE_HERO_IMAGE',
+  APPEARANCE_LOGO_IMAGE: 'APPEARANCE_LOGO_IMAGE',
+  APPEARANCE_WELCOME_TEXT_EN: 'APPEARANCE_WELCOME_TEXT_EN',
+  APPEARANCE_WELCOME_TEXT_SI: 'APPEARANCE_WELCOME_TEXT_SI',
+  APPEARANCE_DEFAULT_THEME: 'APPEARANCE_DEFAULT_THEME',
+  // Login-page branding (shown to logged-out visitors). The image setting holds a private-storage key, never a URL.
+  APPEARANCE_LOGIN_IMAGE: 'APPEARANCE_LOGIN_IMAGE',
+  APPEARANCE_LOGIN_HEADING: 'APPEARANCE_LOGIN_HEADING',
+  APPEARANCE_LOGIN_TEXT: 'APPEARANCE_LOGIN_TEXT',
+  // Login-page colors: JSON of the nine #RRGGBB colors (see appearance.schema.ts). No row = the built-in colors.
+  APPEARANCE_LOGIN_THEME: 'APPEARANCE_LOGIN_THEME',
+} as const
 
 /** Company account resellers tell customers to pay into. The database value overrides the environment default. */
 export async function getCompanyBankDetails(): Promise<string | null> {
@@ -71,7 +85,7 @@ export const settingsService = {
     await notificationService.notifyPlatform({
       type: 'SETTINGS_CHANGED',
       title: 'Company bank details changed',
-      body: `${req.user!.email} changed the bank details shown to resellers. Reason: ${reason}`,
+      body: `${req.user!.email} changed the bank details shown to partners. Reason: ${reason}`,
       link: '/admin/settings',
     })
     return this.get()
@@ -118,15 +132,15 @@ export const settingsService = {
       {
         type: 'SETTINGS_CHANGED',
         title: 'Commission levels changed',
-        body: `${req.user!.email} updated the commission levels (${changes.length} reseller level change${changes.length === 1 ? '' : 's'}). Reason: ${input.reason}`,
+        body: `${req.user!.email} updated the commission levels (${changes.length} partner level change${changes.length === 1 ? '' : 's'}). Reason: ${input.reason}`,
         link: '/admin/settings',
       },
-      ['SUPER_ADMIN', 'ADMIN', 'FINANCE'],
+      ['ADMIN'],
     )
     for (const c of changes) {
       await notificationService.notifyReseller(c.resellerId, {
         type: 'LEVEL_CHANGED',
-        title: 'Your reseller level changed',
+        title: 'Your partner level changed',
         body: `Hexalyte updated the commission levels. Your level is now ${c.to ?? 'none'}. New commissions use the new rate.`,
         link: '/commissions',
       })

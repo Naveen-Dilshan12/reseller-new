@@ -8,10 +8,66 @@ import { IntegrationError } from './integration-error'
 import { integrationRegistry } from './integration-registry'
 import type { SaasIntegration } from './saas-integration'
 
+export type IntegrationReadinessState =
+  | 'MANUAL_FULFILMENT'
+  | 'AWAITING_CREDENTIALS'
+  | 'AWAITING_VERIFICATION'
+  | 'CONNECTED'
+  | 'CONNECTION_ERROR'
+  | 'DISABLED'
+
+export function getIntegrationReadiness(
+  config: Pick<SaasIntegrationConfig, 'provider' | 'baseUrl' | 'apiKeyEncrypted' | 'signingSecretEncrypted'> | null,
+  integrationStatus: IntegrationStatus,
+): { state: IntegrationReadinessState; label: string; description: string } {
+  if (integrationStatus === 'DISABLED') {
+    return {
+      state: 'DISABLED',
+      label: 'Disabled',
+      description: 'Integration is temporarily disabled by an administrator.',
+    }
+  }
+  if (!config || config.provider === 'MANUAL') {
+    return {
+      state: 'MANUAL_FULFILMENT',
+      label: 'Pre-integration / Manual fulfilment',
+      description: 'External provider API is not connected. Trials and activations are queued for administrative manual fulfilment.',
+    }
+  }
+  const provider = integrationRegistry.get(config.provider)
+  if (provider?.requiresCredentials && (!config.baseUrl || !config.apiKeyEncrypted || !config.signingSecretEncrypted)) {
+    return {
+      state: 'AWAITING_CREDENTIALS',
+      label: 'Awaiting API credentials',
+      description: 'Provider API selected but base URL, API key, or signing secret have not been supplied yet.',
+    }
+  }
+  if (integrationStatus === 'CONNECTED') {
+    return {
+      state: 'CONNECTED',
+      label: 'Connected & Verified',
+      description: 'Provider API is verified and active.',
+    }
+  }
+  if (integrationStatus === 'ERROR') {
+    return {
+      state: 'CONNECTION_ERROR',
+      label: 'Connection Error',
+      description: 'Health check failed. Provider API is currently unreachable or credentials were rejected.',
+    }
+  }
+  return {
+    state: 'AWAITING_VERIFICATION',
+    label: 'Configured (Awaiting verification)',
+    description: 'Credentials saved; pending successful health check.',
+  }
+}
+
 /** Admin view of a config. Secrets are reported only as present/absent. */
-export function toSafeConfig(config: SaasIntegrationConfig | null) {
+export function toSafeConfig(config: SaasIntegrationConfig | null, integrationStatus?: IntegrationStatus) {
   if (!config) return null
   const provider = integrationRegistry.get(config.provider)
+  const status = integrationStatus ?? (config.baseUrl ? 'CONFIGURED' : 'NOT_CONFIGURED')
   return {
     provider: config.provider,
     providerLabel: provider?.label ?? config.provider,
@@ -22,6 +78,7 @@ export function toSafeConfig(config: SaasIntegrationConfig | null) {
     lastCheckedAt: config.lastCheckedAt,
     lastCheckOk: config.lastCheckOk,
     lastError: config.lastError,
+    readiness: getIntegrationReadiness(config, status),
     updatedAt: config.updatedAt,
   }
 }
@@ -37,6 +94,22 @@ export function statusAfterConfigChange(config: Parameters<typeof isConfigComple
   return isConfigComplete(config) ? 'CONFIGURED' : 'NOT_CONFIGURED'
 }
 
+/**
+ * Status after settings are saved while the connection itself is unchanged, so the stored health check still applies.
+ * It is what `healthCheck` would have stored for that result (CONNECTED for a passing remote provider, CONFIGURED for a
+ * passing manual one, ERROR for a failing one), so the status never contradicts `lastCheckOk`. With no check to keep
+ * (never checked, or the connection changed and the check was cleared) it is `statusAfterConfigChange`.
+ */
+export function statusKeepingLastCheck(
+  config: Parameters<typeof isConfigComplete>[0],
+  lastCheck: { lastCheckedAt: Date | null; lastCheckOk: boolean | null } | null,
+): IntegrationStatus {
+  const configured = statusAfterConfigChange(config)
+  if (configured !== 'CONFIGURED' || !lastCheck?.lastCheckedAt || lastCheck.lastCheckOk === null) return configured
+  if (!lastCheck.lastCheckOk) return 'ERROR'
+  return integrationRegistry.get(config.provider)?.requiresCredentials ? 'CONNECTED' : configured
+}
+
 export interface TrialCapabilityInput {
   status: string
   trialAvailable: boolean
@@ -45,19 +118,19 @@ export interface TrialCapabilityInput {
 }
 
 /**
- * Whether trials for a product can be created through the platform. Needs a
- * remote partner API: manual products have no SaaS trial API to call, and the
- * platform must not re-implement SaaS registration.
+ * Whether trials for a product can be requested through the platform.
+ * Remote partner APIs provision automatically; manual / pre-integration
+ * products record requests in SUBMITTED status for administrator manual fulfilment.
  */
 export function trialCapability(p: TrialCapabilityInput): { canCreateTrial: boolean; reason: string | null } {
   if (p.status !== 'ACTIVE') return { canCreateTrial: false, reason: 'Product is not available' }
   if (!p.trialAvailable) return { canCreateTrial: false, reason: 'This product does not offer a free trial' }
-  const provider = p.integration && integrationRegistry.get(p.integration.provider)
-  if (!provider?.requiresCredentials || p.integrationStatus === 'NOT_CONFIGURED') {
-    return { canCreateTrial: false, reason: 'Trial creation through the reseller platform is not available for this product yet' }
-  }
   if (p.integrationStatus === 'DISABLED') {
     return { canCreateTrial: false, reason: 'Trial creation is temporarily unavailable' }
+  }
+  const provider = p.integration && integrationRegistry.get(p.integration.provider)
+  if (provider?.requiresCredentials && p.integrationStatus === 'NOT_CONFIGURED') {
+    return { canCreateTrial: false, reason: 'Trial creation through the partner platform is awaiting provider API configuration' }
   }
   return { canCreateTrial: true, reason: null }
 }

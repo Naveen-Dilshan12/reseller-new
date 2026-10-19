@@ -21,6 +21,7 @@ export class FashionErpIntegration extends PartnerApiIntegration {
       phone: input.contactPhone,
       country: 'LK',
       currency: 'LKR',
+      ...(input.password ? { adminPassword: input.password, password: input.password } : {}),
     }
   }
 

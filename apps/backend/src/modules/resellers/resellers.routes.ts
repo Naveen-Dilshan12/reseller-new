@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { registrationLimiter } from '../../config/rate-limit'
-import { authenticate, requirePermission } from '../../middleware/auth.middleware'
+import { authenticate, optionalAuthenticate, requirePermission } from '../../middleware/auth.middleware'
 import { validate } from '../../middleware/validate.middleware'
 import { asyncHandler } from '../../utils/async-handler'
 import { sendSuccess } from '../../utils/response'
@@ -19,9 +19,20 @@ import {
   rejectApplicationSchema,
 } from './reseller.schema'
 
-/** Public: `/reseller-registration` */
+/**
+ * Public: `/reseller-registration`. Reachable without a session (a genuinely
+ * new applicant), but `optionalAuthenticate` picks up a Bearer token when one
+ * is sent so the service can link the application to the caller's own
+ * account instead of resolving a target user from the request body.
+ */
 export const registrationRouter = Router()
-registrationRouter.post('/', registrationLimiter, validate(registerResellerSchema), resellersController.register)
+registrationRouter.post(
+  '/',
+  registrationLimiter,
+  optionalAuthenticate,
+  validate(registerResellerSchema),
+  resellersController.register,
+)
 
 /** Platform staff: `/admin/reseller-applications` */
 export const applicationsRouter = Router()
@@ -64,15 +75,20 @@ resellersAdminRouter.get(
     res.json({ success: true, data: items, meta: { total, page: q.page, limit: q.limit, totalPages: Math.ceil(total / q.limit), statusCounts } })
   }),
 )
+resellersAdminRouter.get(
+  '/:id',
+  requirePermission('resellers:read'),
+  asyncHandler(async (req, res) => sendSuccess(res, await adminResellersService.summary(req.params.id))),
+)
 resellersAdminRouter.post(
   '/:id/suspend',
   requirePermission('resellers:manage'),
   validate(suspendSchema),
-  asyncHandler(async (req, res) => sendSuccess(res, await adminResellersService.suspend(req, req.params.id, req.body.reason), 'Reseller suspended')),
+  asyncHandler(async (req, res) => sendSuccess(res, await adminResellersService.suspend(req, req.params.id, req.body.reason), 'Partner suspended')),
 )
 resellersAdminRouter.post(
   '/:id/reactivate',
   requirePermission('resellers:manage'),
   validate(reactivateSchema),
-  asyncHandler(async (req, res) => sendSuccess(res, await adminResellersService.reactivate(req, req.params.id, req.body.note), 'Reseller reactivated')),
+  asyncHandler(async (req, res) => sendSuccess(res, await adminResellersService.reactivate(req, req.params.id, req.body.note), 'Partner reactivated')),
 )

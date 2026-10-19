@@ -25,7 +25,7 @@ const summarySelect = {
 
 async function findOrThrow(id: string) {
   const reseller = await prisma.reseller.findUnique({ where: { id }, include: { bankAccount: true } })
-  if (!reseller) throw notFoundError('Reseller application')
+  if (!reseller) throw notFoundError('Partner application')
   return reseller
 }
 
@@ -37,7 +37,7 @@ async function decide(id: string, status: Extract<ResellerStatus, 'ACTIVE' | 'RE
   const result = await prisma.reseller.updateMany({ where: { id, status: 'PENDING' }, data: { ...data, status } })
   if (result.count === 0) {
     const existing = await prisma.reseller.findUnique({ where: { id }, select: { status: true } })
-    if (!existing) throw notFoundError('Reseller application')
+    if (!existing) throw notFoundError('Partner application')
     throw conflict(`Application has already been reviewed (status: ${existing.status})`)
   }
   return findOrThrow(id)
@@ -143,7 +143,7 @@ export const resellerApplicationsService = {
     await notificationService.notifyReseller(id, {
       type: 'RESELLER_APPLICATION_APPROVED',
       title: 'Application approved',
-      body: `Welcome to Hexalyte! Your reseller account ${reseller.code} is now active.`,
+      body: `Welcome to Hexalyte! Your partner account ${reseller.code} is now active.`,
       link: '/dashboard',
     })
     return { id: reseller.id, code: reseller.code, status: reseller.status }

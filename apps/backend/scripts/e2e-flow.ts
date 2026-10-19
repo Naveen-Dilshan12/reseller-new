@@ -4,7 +4,7 @@
  * Runs the real API against a DISPOSABLE, migrated and seeded database plus a
  * mock SaaS partner API that verifies the bearer key and HMAC signature.
  *
- *   E2E_DATABASE_URL=postgresql://... SEED_SUPER_ADMIN_EMAIL=... SEED_SUPER_ADMIN_PASSWORD=... \
+ *   E2E_DATABASE_URL=postgresql://... DEMO_ADMIN_EMAIL=... DEMO_ADMIN_PASSWORD=... \
  *     npx tsx scripts/e2e-flow.ts
  *
  * Never point it at a real database: it creates resellers, customers and commissions.
@@ -17,10 +17,10 @@ import crypto from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 
 const DB = process.env.E2E_DATABASE_URL
-const ADMIN_EMAIL = process.env.SEED_SUPER_ADMIN_EMAIL
-const ADMIN_PASSWORD = process.env.SEED_SUPER_ADMIN_PASSWORD
+const ADMIN_EMAIL = process.env.DEMO_ADMIN_EMAIL
+const ADMIN_PASSWORD = process.env.DEMO_ADMIN_PASSWORD
 if (!DB || !ADMIN_EMAIL || !ADMIN_PASSWORD) {
-  console.error('E2E_DATABASE_URL, SEED_SUPER_ADMIN_EMAIL and SEED_SUPER_ADMIN_PASSWORD are required')
+  console.error('E2E_DATABASE_URL, DEMO_ADMIN_EMAIL and DEMO_ADMIN_PASSWORD are required')
   process.exit(2)
 }
 
@@ -216,8 +216,13 @@ async function main() {
     const weak = await call('POST', '/reseller-registration', { json: { ...registration('W'), password: 'a'.repeat(73) + 'A1', confirmPassword: 'a'.repeat(73) + 'A1' } })
     check('password over bcrypt 72-byte limit rejected', weak.status === 422, weak.status)
 
+    // Make the run independent of ACCOUNT_VERIFICATION_REQUIRED_FROM: these throwaway accounts count as verified.
+    await prisma.user.updateMany({ where: { email: { in: [regA.personal.email, regB.personal.email] } }, data: { emailVerified: new Date() } })
     const early = await login(regA.personal.email, regA.password)
-    check('unapproved reseller cannot log in', early.status === 403, { status: early.status, code: early.body.code })
+    // Approval is enforced per route (see tests/approval-gate.test.ts), not at login.
+    check('unapproved reseller can sign in', early.status === 200, { status: early.status, code: early.body.code })
+    const gated = await asReseller(early.body.data.accessToken, 'GET', '/products')
+    check('unapproved reseller is refused seller routes (403)', gated.status === 403, gated.status)
 
     section('2. Admin approval')
     const apps = await call<any[]>('GET', '/admin/reseller-applications?status=PENDING&limit=100', { token: admin })
@@ -400,15 +405,8 @@ async function main() {
     const kept = await prisma.commission.findUnique({ where: { id: toApprove.id } })
     check('earned (approved) commission is kept after cancellation', kept?.status === 'APPROVED' || kept?.status === 'PAYABLE', kept?.status)
 
-    section('Agent role and SaaS credentials')
-    const agentEmail = `agent-${crypto.randomInt(1e6, 9e6)}@e2e.test`
-    const { hashPassword } = await import('../src/utils/password')
-    await prisma.user.create({ data: { email: agentEmail, name: 'Agent', passwordHash: await hashPassword('Agent12345X'), role: 'RESELLER_AGENT', resellerId: appA.id } })
-    const agent = (await login(agentEmail, 'Agent12345X')).body.data.accessToken
-    const agentAcc = await asReseller(agent, 'GET', `/customer-accounts/${account.id}`)
-    check('agent sees own-reseller account without commission data', agentAcc.status === 200 && !('commissions' in agentAcc.body.data), Object.keys(agentAcc.body.data ?? {}))
-    const agentComms = await asReseller(agent, 'GET', '/commissions')
-    check('agent cannot read commissions', agentComms.status === 403, agentComms.status)
+    // The former RESELLER_AGENT role no longer exists (roles are ADMIN and SELLER), so there is no agent scenario any more.
+    section('SaaS credentials')
     const leaked = responseLog.some((t) => t.includes(SAAS_API_KEY) || t.includes(SAAS_SIGNING_SECRET) || t.includes(DB!) || t.includes(saasUrl))
     check('no reseller response contained SaaS key, secret, URL or DB URL', !leaked)
     check('every SaaS call carried a valid signature', saas.badSignatures === 0, saas.badSignatures)

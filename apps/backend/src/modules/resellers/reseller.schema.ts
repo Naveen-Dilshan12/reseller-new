@@ -58,11 +58,14 @@ export const registerResellerSchema = z
         .transform(stripSeparators)
         .pipe(z.string().regex(/^\d{6,20}$/, 'Account number must be 6-20 digits')),
     }),
-    password: passwordSchema,
-    confirmPassword: z.string(),
-    acceptTerms: z.literal(true, { errorMap: () => ({ message: 'You must accept the reseller terms' }) }),
+    password: passwordSchema.optional(),
+    confirmPassword: z.string().optional(),
+    acceptTerms: z.literal(true, { errorMap: () => ({ message: 'You must accept the partner terms' }) }),
   })
-  .refine((d) => d.password === d.confirmPassword, { path: ['confirmPassword'], message: 'Passwords do not match' })
+  .refine(
+    (d) => (!d.password && !d.confirmPassword) || d.password === d.confirmPassword,
+    { path: ['confirmPassword'], message: 'Passwords do not match' },
+  )
 
 export type RegisterResellerInput = z.infer<typeof registerResellerSchema>
 

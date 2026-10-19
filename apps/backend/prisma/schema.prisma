@@ -16,11 +16,8 @@ datasource db {
 // ─── Identity & access ────────────────────────────────────────────────────────
 
 enum UserRole {
-  SUPER_ADMIN
   ADMIN
-  FINANCE
-  RESELLER_ADMIN
-  RESELLER_AGENT
+  SELLER
 }
 
 enum UserStatus {
@@ -40,12 +37,18 @@ model User {
   failedLoginCount Int        @default(0)
   lockedUntil      DateTime?
   lastLoginAt      DateTime?
+  emailVerified    DateTime?
+  // Set only by a successful SMS one-time code. Contact/WhatsApp numbers stay in `phone`.
+  phoneVerifiedAt  DateTime?
+  verifiedPhone    String?    @unique
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
-  reseller      Reseller?      @relation(fields: [resellerId], references: [id])
-  refreshTokens RefreshToken[]
-  notifications Notification[]
+  reseller                Reseller?                @relation(fields: [resellerId], references: [id])
+  refreshTokens           RefreshToken[]
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  notifications           Notification[]
 
   @@index([resellerId])
   @@map("users")
@@ -65,6 +68,39 @@ model RefreshToken {
 
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  ip        String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id             String    @id @default(cuid())
+  userId         String
+  tokenHash      String
+  expiresAt      DateTime
+  failedAttempts Int       @default(0)
+  usedAt         DateTime?
+  ip             String?
+  userAgent      String?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("email_verification_tokens")
 }
 
 // ─── Resellers ────────────────────────────────────────────────────────────────
@@ -123,6 +159,7 @@ model Reseller {
   accounts           CustomerAccount[]
   trialRequests      TrialRequest[]
   activationRequests ActivationRequest[]
+  demoRequests       DemoRequest[]
   bankSlips          BankSlip[]
   commissions        Commission[]
   levelChanges       ResellerLevelChange[]
@@ -189,6 +226,7 @@ model SaasProduct {
   accounts           CustomerAccount[]
   trialRequests      TrialRequest[]
   activationRequests ActivationRequest[]
+  demoRequests       DemoRequest[]
   commissions        Commission[]
   integrationLogs    IntegrationLog[]
   webhookEvents      WebhookEvent[]
@@ -293,11 +331,12 @@ model WebhookEvent {
 /// A client business brought in by a reseller. Only the reseller's own
 /// reference label is stored; the business's data lives in each SaaS.
 model Customer {
-  id          String   @id @default(cuid())
-  resellerId  String
-  displayName String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String            @id @default(cuid())
+  customerCode String?           @unique @map("customer_code")
+  resellerId   String
+  displayName  String
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
 
   reseller Reseller          @relation(fields: [resellerId], references: [id])
   accounts CustomerAccount[]
@@ -484,6 +523,107 @@ model ActivationStatusChange {
 
   @@index([activationRequestId, createdAt])
   @@map("activation_status_changes")
+}
+
+// ─── Manual demo requests ──────────────────────────────────────────────────────
+
+enum DemoRequestStatus {
+  /// Submitted by the reseller, awaiting admin review.
+  PENDING
+  /// Approved by an admin; the admin must still create the demo shop manually in the SaaS.
+  APPROVED
+  REJECTED
+  /// Admin has manually created the demo shop/tenant in the SaaS and recorded its access details here.
+  DEMO_CREATED
+  /// Admin has confirmed the demo and its access/delivery details are ready; the reseller can now deliver them.
+  CONFIRMED
+}
+
+/// A reseller's request for Hexalyte staff to manually create a demo shop in a
+/// SaaS product for a prospective customer. Unlike a trial, a demo is never
+/// provisioned automatically, is always reviewed by an admin first, and never
+/// creates a Customer/CustomerAccount record — it only tracks the request and
+/// its outcome. The SaaS itself stays the source of truth for the demo shop.
+///
+/// DB-only constraint not representable here: a partial + expression unique
+/// index on (resellerId, productId, LOWER(TRIM(contactEmail))) WHERE status
+/// != REJECTED, added in migration 20261014130000_demo_requests_open_duplicate_index.
+/// Prisma's schema language has no syntax for partial/expression indexes, so
+/// it is hand-written SQL with no `@@index`/`@@unique` counterpart here —
+/// `prisma migrate dev`/`db push` only generate DDL for what this file
+/// declares, so they will not alter or drop it.
+model DemoRequest {
+  id         String            @id @default(cuid())
+  resellerId String
+  productId  String
+  status     DemoRequestStatus @default(PENDING)
+
+  // Prospect details entered by the reseller. Intentionally not linked to
+  // Customer/CustomerAccount: a demo is a sales-enablement request, not yet a
+  // committed customer relationship.
+  businessName String
+  contactName  String
+  contactEmail String
+  contactPhone String
+  notes        String?
+
+  requestedById String
+  submittedAt   DateTime @default(now())
+
+  reviewedById    String?
+  decidedAt       DateTime?
+  rejectionReason String?
+
+  // Recorded by an admin only after manually creating the demo shop/tenant in
+  // the SaaS. `accessInstructions` must never be a permanent secret (see
+  // demo.service.ts generateWelcomeMessage()).
+  shopName           String?
+  planName           String?
+  loginUrl           String?
+  shopUrl            String?
+  accessUsername     String?
+  accessInstructions String?
+  demoCreatedAt      DateTime?
+  demoCreatedById    String?
+
+  /// Generated from the fields above once recorded; regenerated if they are edited before confirmation.
+  welcomeMessage String?
+
+  confirmedAt   DateTime?
+  confirmedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reseller Reseller                  @relation(fields: [resellerId], references: [id])
+  product  SaasProduct               @relation(fields: [productId], references: [id])
+  history  DemoRequestStatusChange[]
+
+  @@index([resellerId, status])
+  @@index([productId, status])
+  @@index([status, submittedAt])
+  @@index([resellerId, productId, contactEmail, status])
+  @@map("demo_requests")
+}
+
+/// Append-only timeline of every status change on a demo request, mirroring
+/// ActivationStatusChange.
+model DemoRequestStatusChange {
+  id            String             @id @default(cuid())
+  demoRequestId String
+  fromStatus    DemoRequestStatus?
+  toStatus      DemoRequestStatus
+  action        String
+  /// Visible to the reseller only when `internal` is false.
+  note          String?
+  internal      Boolean            @default(false)
+  actorUserId   String?
+  createdAt     DateTime           @default(now())
+
+  demoRequest DemoRequest @relation(fields: [demoRequestId], references: [id], onDelete: Cascade)
+
+  @@index([demoRequestId, createdAt])
+  @@map("demo_request_status_changes")
 }
 
 // ─── Bank slips ───────────────────────────────────────────────────────────────

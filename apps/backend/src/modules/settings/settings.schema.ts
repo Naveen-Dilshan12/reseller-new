@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-const reason = z.string().trim().min(5, 'Give a reason for the change (at least 5 characters)').max(300)
+export const reason = z.string().trim().min(5, 'Give a reason for the change (at least 5 characters)').max(300)
 
 export const updateBankDetailsSchema = z
   .object({
@@ -43,5 +43,40 @@ export const updateLevelsSchema = z
       }
     })
   })
+
+import { normalizeSmsPhone, SMS_PHONE_MESSAGE } from '../../utils/phone'
+
+export const smsPhoneField = z
+  .string({ required_error: 'Phone number is required' })
+  .max(40, SMS_PHONE_MESSAGE)
+  .transform((value, ctx) => {
+    const normalized = normalizeSmsPhone(value)
+    if (!normalized) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: SMS_PHONE_MESSAGE })
+      return z.NEVER
+    }
+    return normalized
+  })
+
+/** `apiKey` is accepted only together with `updateApiKey: true`; otherwise the stored key is kept as it is. */
+export const updateSmsGatewaySchema = z
+  .object({
+    provider: z.literal('SMSLENZ').default('SMSLENZ'),
+    userId: z.string().trim().min(1, 'User ID is required').max(40).regex(/^[A-Za-z0-9_-]+$/, 'User ID may only contain letters, digits, - and _'),
+    senderId: z.string().trim().min(1, 'Sender ID is required').max(20).regex(/^[A-Za-z0-9 _.-]+$/, 'Sender ID may only contain letters, digits, spaces, . - and _'),
+    enabled: z.boolean(),
+    dailyLimit: z.number().int().min(1, 'Daily limit must be at least 1').max(100000).default(500),
+    updateApiKey: z.boolean().default(false),
+    apiKey: z.string().trim().min(8, 'API key looks too short').max(200).optional(),
+  })
+  .strict()
+  .superRefine((d, ctx) => {
+    if (d.updateApiKey && !d.apiKey) ctx.addIssue({ code: 'custom', path: ['apiKey'], message: 'Enter the new API key' })
+    if (!d.updateApiKey && d.apiKey) ctx.addIssue({ code: 'custom', path: ['updateApiKey'], message: 'Choose "update API key" to replace the stored key' })
+  })
+
+export const smsTestSchema = z.object({ phone: smsPhoneField }).strict()
+
+export type UpdateSmsGatewayInput = z.infer<typeof updateSmsGatewaySchema>
 
 export type UpdateLevelsInput = z.infer<typeof updateLevelsSchema>

@@ -13,7 +13,7 @@ export const resellerAccessService = {
   /** Every product with this reseller's access status (null when never granted). */
   async list(resellerId: string) {
     const reseller = await prisma.reseller.findUnique({ where: { id: resellerId }, select: { id: true } })
-    if (!reseller) throw notFoundError('Reseller')
+    if (!reseller) throw notFoundError('Partner')
     const products = await prisma.saasProduct.findMany({
       select: {
         ...PUBLIC_PRODUCT_SELECT,
@@ -35,10 +35,13 @@ export const resellerAccessService = {
       prisma.reseller.findUnique({ where: { id: resellerId }, select: { id: true } }),
       prisma.saasProduct.findUnique({ where: { id: productId }, select: { name: true } }),
     ])
-    if (!reseller) throw notFoundError('Reseller')
+    if (!reseller) throw notFoundError('Partner')
     if (!product) throw notFoundError('SaaS product')
 
     const now = new Date()
+    // An omitted note keeps the stored one (the admin UI leaves it out when the field is blank);
+    // an explicit empty string clears it.
+    const note = input.note === undefined ? undefined : input.note || null
     const access = await prisma.$transaction(async (tx) => {
       const previous = await tx.resellerProductAccess.findUnique({
         where: { resellerId_productId: { resellerId, productId } },
@@ -46,10 +49,10 @@ export const resellerAccessService = {
       })
       const saved = await tx.resellerProductAccess.upsert({
         where: { resellerId_productId: { resellerId, productId } },
-        create: { resellerId, productId, status: input.status, note: input.note, grantedById: req.user!.userId, statusChangedAt: now },
+        create: { resellerId, productId, status: input.status, note, grantedById: req.user!.userId, statusChangedAt: now },
         update: {
           status: input.status,
-          note: input.note ?? null,
+          ...(note !== undefined ? { note } : {}),
           ...(previous?.status !== input.status ? { statusChangedAt: now } : {}),
         },
       })
@@ -90,16 +93,17 @@ export const resellerAccessService = {
     return result.count
   },
 
-  /** Throws unless the reseller may sell this product right now. */
+  /** Throws unless the reseller may sell this product right now; returns the product's name for messages. */
   async assertCanSell(resellerId: string, productId: string, db: Db = prisma) {
     const product = await db.saasProduct.findUnique({
       where: { id: productId },
-      select: { status: true, resellerAccess: { where: { resellerId }, select: { status: true } } },
+      select: { name: true, status: true, resellerAccess: { where: { resellerId }, select: { status: true } } },
     })
     if (!product) throw notFoundError('SaaS product')
     if (product.status !== 'ACTIVE') throw badRequest('This product is not available')
     if (product.resellerAccess[0]?.status !== 'ACTIVE') {
-      throw badRequest('Reseller does not have active access to this product')
+      throw badRequest('Partner does not have active access to this product')
     }
+    return { name: product.name }
   },
 }

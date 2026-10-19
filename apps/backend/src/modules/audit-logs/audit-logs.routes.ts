@@ -49,7 +49,8 @@ router.get(
         : {}),
     }
     const [items, total] = await Promise.all([
-      prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, ...toSkipTake(q) }),
+      // `id` breaks ties between entries written in the same instant, so paging never repeats or skips one.
+      prisma.auditLog.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], ...toSkipTake(q) }),
       prisma.auditLog.count({ where }),
     ])
     sendPaginated(res, items, total, q.page, q.limit)

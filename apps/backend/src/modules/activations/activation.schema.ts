@@ -1,8 +1,14 @@
 import { z } from 'zod'
+import type { ActivationRequestStatus } from '@prisma/client'
 import { paginationSchema } from '../../utils/pagination'
 import { periodMonthSchema } from '../../utils/period'
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
+
+const ACTIVATION_STATUSES = ['PENDING_REVIEW', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'ACTIVATION_COMPLETED', 'CANCELLED'] as const satisfies readonly ActivationRequestStatus[]
+// Fails to compile if the Prisma enum gains a status this list does not know about.
+const _allStatusesListed: [Exclude<ActivationRequestStatus, (typeof ACTIVATION_STATUSES)[number]>] extends [never] ? true : never = true
+void _allStatusesListed
 
 /** Multipart text fields of the activation request form; the bank slip is the `slip` file. */
 export const createActivationSchema = z
@@ -19,14 +25,19 @@ export const createActivationSchema = z
   })
   .strict()
 
+/** `status` query filter: one or more activation request statuses, comma-separated (also used by the bank slips register). */
+export const activationStatusFilter = z
+  .string()
+  .regex(/^[A-Z_]+(,[A-Z_]+)*$/)
+  .refine((v) => v.split(',').every((s) => (ACTIVATION_STATUSES as readonly string[]).includes(s)), {
+    message: `Use one or more of ${ACTIVATION_STATUSES.join(', ')}, separated by commas`,
+  })
+
 export const listActivationsSchema = paginationSchema.extend({
   resellerId: z.string().max(40).optional(),
   productId: z.string().max(40).optional(),
   customerAccountId: z.string().max(40).optional(),
-  status: z
-    .string()
-    .regex(/^[A-Z_]+(,[A-Z_]+)*$/)
-    .optional(),
+  status: activationStatusFilter.optional(),
   search: z.string().trim().max(100).optional(),
 })
 
@@ -46,6 +57,7 @@ export const rejectSchema = z
 export const completeManualSchema = z
   .object({
     activationReference: z.string().trim().min(2, 'Enter the subscription / invoice reference from the SaaS').max(100),
+    externalTenantId: z.string().trim().min(1).max(100).optional(),
     note: z.string().trim().max(500).optional(),
   })
   .strict()

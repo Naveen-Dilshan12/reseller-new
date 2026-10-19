@@ -40,6 +40,13 @@ export function randomToken(bytes = 48): string {
   return crypto.randomBytes(bytes).toString('base64url')
 }
 
+/**
+ * Generates a cryptographically secure 6-digit numeric OTP (100000 - 999999).
+ */
+export function generateNumericOtp(): string {
+  return crypto.randomInt(100000, 1000000).toString()
+}
+
 export function hmacSha256(secret: string, message: string): string {
   return crypto.createHmac('sha256', secret).update(message).digest('hex')
 }

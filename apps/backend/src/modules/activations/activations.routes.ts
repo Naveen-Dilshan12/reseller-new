@@ -37,8 +37,8 @@ router.get(
   validate(listActivationsSchema, 'query'),
   asyncHandler(async (req, res) => {
     const q = req.query as unknown as ListActivationsQuery
-    const { items, total } = await activationService.list(q, req)
-    sendPaginated(res, items, total, q.page, q.limit)
+    const { items, total, pipelineCounts } = await activationService.list(q, req)
+    sendPaginated(res, items, total, q.page, q.limit, { pipelineCounts })
   }),
 )
 

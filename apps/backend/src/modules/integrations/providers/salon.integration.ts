@@ -18,6 +18,7 @@ export class SalonIntegration extends PartnerApiIntegration {
       owner_email: input.contactEmail,
       owner_phone: input.contactPhone,
       plan: 'trial',
+      ...(input.password ? { password: input.password } : {}),
     }
   }
 

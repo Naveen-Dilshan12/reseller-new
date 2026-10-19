@@ -4,7 +4,7 @@ import { prisma } from './config/database'
 import { promotePayable } from './modules/commissions/commission-ledger.service'
 
 const server = app.listen(env.PORT, () => {
-  console.log(`Hexalyte Reseller API listening on :${env.PORT}/${env.API_PREFIX}`)
+  console.log(`Hexalyte Partner API listening on :${env.PORT}/${env.API_PREFIX}`)
 })
 
 // Commission reads also promote on demand; this keeps totals current between requests.

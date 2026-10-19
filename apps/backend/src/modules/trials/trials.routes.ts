@@ -15,8 +15,8 @@ router.get(
   validate(listTrialsSchema, 'query'),
   asyncHandler(async (req, res) => {
     const q = req.query as unknown as ListTrialsQuery
-    const { items, total } = await trialService.list(q, req)
-    sendPaginated(res, items, total, q.page, q.limit)
+    const { items, total, pipelineCounts } = await trialService.list(q, req)
+    sendPaginated(res, items, total, q.page, q.limit, { pipelineCounts })
   }),
 )
 

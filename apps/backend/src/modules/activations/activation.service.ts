@@ -8,7 +8,7 @@ import { AppError, badRequest, conflict, forbidden, notFoundError } from '../../
 import { isPlatformRole } from '../../rbac/permissions'
 import { sha256 } from '../../utils/crypto'
 import { toSkipTake } from '../../utils/pagination'
-import { periodMonthOf, shiftPeriod } from '../../utils/period'
+import { billingWindow } from '../../utils/period'
 import { auditService } from '../audit-logs/audit.service'
 import { notificationService } from '../notifications/notification.service'
 import {
@@ -29,7 +29,7 @@ type Status = ActivationRequestStatus
 type Tx = Prisma.TransactionClient
 
 const OPEN_STATUSES: Status[] = ['PENDING_REVIEW', 'UNDER_REVIEW', 'APPROVED']
-const REVIEW_ROLES = ['SUPER_ADMIN', 'ADMIN', 'FINANCE'] as const
+const REVIEW_ROLES = ['ADMIN'] as const
 const SLIP_FOLDER = 'bank-slips'
 const REFERENCE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -203,6 +203,7 @@ async function platformView(request: Detail) {
     warnings: {
       slipReusedIn: duplicateSlips.map((d) => d.activationRequest),
       transactionRefUsedIn: duplicateRefs,
+      awaitingSaaSTenant: !request.customerAccount.externalTenantId,
     },
     people: {
       requestedBy: names.get(request.requestedById) ?? null,
@@ -355,10 +356,14 @@ export const activationService = {
 
   async list(query: ListActivationsQuery, req: Request) {
     const statuses = query.status?.split(',') as Status[] | undefined
-    const where: Prisma.ActivationRequestWhereInput = {
-      resellerId: resolveResellerId(req, query.resellerId),
+    const resellerId = resolveResellerId(req, query.resellerId)
+    const baseWhere: Prisma.ActivationRequestWhereInput = {
+      resellerId,
       productId: query.productId,
       customerAccountId: query.customerAccountId,
+    }
+    const where: Prisma.ActivationRequestWhereInput = {
+      ...baseWhere,
       ...(statuses ? { status: { in: statuses } } : {}),
       ...(query.search
         ? {
@@ -366,11 +371,19 @@ export const activationService = {
               { reference: { contains: query.search, mode: 'insensitive' } },
               { transactionRef: { contains: query.search, mode: 'insensitive' } },
               { customerAccount: { customer: { displayName: { contains: query.search, mode: 'insensitive' } } } },
+              { customerAccount: { customer: { customerCode: { contains: query.search, mode: 'insensitive' } } } },
             ],
           }
         : {}),
     }
-    const [items, total] = await Promise.all([
+    const [
+      items,
+      total,
+      totalCount,
+      pendingReviewCount,
+      underReviewCount,
+      completedCount,
+    ] = await Promise.all([
       prisma.activationRequest.findMany({
         where,
         select: {
@@ -390,8 +403,20 @@ export const activationService = {
         ...toSkipTake(query),
       }),
       prisma.activationRequest.count({ where }),
+      prisma.activationRequest.count({ where: baseWhere }),
+      prisma.activationRequest.count({ where: { ...baseWhere, status: 'PENDING_REVIEW' } }),
+      prisma.activationRequest.count({ where: { ...baseWhere, status: 'UNDER_REVIEW' } }),
+      prisma.activationRequest.count({ where: { ...baseWhere, status: 'ACTIVATION_COMPLETED' } }),
     ])
-    return { items, total }
+
+    const pipelineCounts = {
+      total: totalCount,
+      pendingReview: pendingReviewCount,
+      underReview: underReviewCount,
+      completed: completedCount,
+    }
+
+    return { items, total, pipelineCounts }
   },
 
   async get(id: string, req: Request) {
@@ -408,7 +433,7 @@ export const activationService = {
 
   async create(input: CreateActivationInput, file: UploadedSlip | undefined, req: Request) {
     const user = currentUser(req)
-    if (isPlatformRole(user.role) || !user.resellerId) throw forbidden('Activation requests are submitted by resellers')
+    if (isPlatformRole(user.role) || !user.resellerId) throw forbidden('Activation requests are submitted by partners')
     const resellerId = user.resellerId
 
     if (!file) throw badRequest('Upload the bank slip', ['slip: Upload the bank slip'])
@@ -416,14 +441,50 @@ export const activationService = {
     if (!detected) throw badRequest('Bank slip must be a JPG, PNG, WEBP or PDF file', ['slip: Unsupported file type'])
 
     await resellerAccessService.assertCanSell(resellerId, input.productId)
-    const account = await prisma.customerAccount.findUnique({
-      where: { customerId_productId: { customerId: input.customerId, productId: input.productId } },
-      select: { id: true, resellerId: true, externalTenantId: true, product: { select: { monthlyPrice: true, currency: true, name: true } } },
-    })
-    if (!account || account.resellerId !== resellerId) {
-      throw badRequest('This customer has no account for the selected product. Create a trial first.', ['productId: No account for this customer'])
+    let resolvedCustomerId = input.customerId
+    if (input.customerId.startsWith('CUS-')) {
+      const match = await prisma.customer.findFirst({
+        where: { customerCode: input.customerId },
+        select: { id: true, resellerId: true },
+      })
+      if (!match || match.resellerId !== resellerId) {
+        throw notFoundError('Customer')
+      }
+      resolvedCustomerId = match.id
     }
-    if (!account.externalTenantId) throw badRequest('The customer’s SaaS account has not been created yet. Wait for the trial to complete.')
+
+    const account = await prisma.customerAccount.findUnique({
+      where: { customerId_productId: { customerId: resolvedCustomerId, productId: input.productId } },
+      select: {
+        id: true,
+        resellerId: true,
+        externalTenantId: true,
+        status: true,
+        product: { select: { monthlyPrice: true, currency: true, name: true } },
+      },
+    })
+
+    if (!account) {
+      throw badRequest('The customer must have a trial account for this product before requesting paid activation. Please provision a trial first.')
+    }
+    if (account.resellerId !== resellerId) {
+      throw notFoundError('Customer')
+    }
+    if (!account.externalTenantId) {
+      throw badRequest('The customer account has no provisioned SaaS tenant. Provision a trial through the SaaS integration first before submitting paid activation.')
+    }
+    if (account.status === 'ACTIVE') {
+      throw conflict(`This customer already has an active paid subscription for ${account.product.name}`)
+    }
+
+    // Block duplicate activation request if an open request is already under review
+    const anyOpen = await prisma.activationRequest.findFirst({
+      where: { customerAccountId: account.id, status: { in: OPEN_STATUSES } },
+      select: { reference: true, status: true },
+    })
+    if (anyOpen) {
+      throw conflict(`An activation request (${anyOpen.reference}) is already pending review for this customer account`)
+    }
 
     if (!new Prisma.Decimal(input.amount).equals(account.product.monthlyPrice)) {
       throw badRequest(`The monthly subscription fee for ${account.product.name} is ${account.product.currency} ${account.product.monthlyPrice.toFixed(2)}`, [
@@ -431,8 +492,8 @@ export const activationService = {
       ])
     }
 
-    const current = periodMonthOf()
-    if (input.periodMonth < shiftPeriod(current, -1) || input.periodMonth > shiftPeriod(current, 2)) {
+    const billing = billingWindow()
+    if (input.periodMonth < billing.from || input.periodMonth > billing.to) {
       throw badRequest('Billing month must be between last month and two months ahead', ['periodMonth: Out of range'])
     }
     const transferDate = new Date(`${input.transferDate}T00:00:00Z`)
@@ -678,9 +739,19 @@ export const activationService = {
   },
 
   /** Confirms an activation done by staff in the SaaS's own admin console. */
-  async completeManually(id: string, input: { activationReference: string; note?: string }, req: Request) {
+  async completeManually(id: string, input: { activationReference: string; externalTenantId?: string; note?: string }, req: Request) {
     const request = await loadDetail(id)
     if (request.status !== 'APPROVED') throw conflict('Only approved requests can be completed')
+    if (!request.customerAccount.externalTenantId) {
+      if (!input.externalTenantId) {
+        throw badRequest('Enter the external tenant ID created in the SaaS console to complete activation')
+      }
+      await prisma.customerAccount.update({
+        where: { id: request.customerAccountId },
+        data: { externalTenantId: input.externalTenantId.trim() },
+      })
+      request.customerAccount.externalTenantId = input.externalTenantId.trim()
+    }
     await complete(req, request, 'MANUAL', { activationReference: input.activationReference, note: input.note })
     return platformView(await loadDetail(id))
   },

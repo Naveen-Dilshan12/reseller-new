@@ -94,12 +94,60 @@ export const dashboardService = {
       can.trials ? prisma.trialRequest.count({ where: { resellerId, productId, createdAt: range } }) : null,
       can.activations ? prisma.activationRequest.count({ where: { resellerId, productId, submittedAt: range } }) : null,
     ])
-    if (!reseller) throw notFoundError('Reseller')
+    if (!reseller) throw notFoundError('Partner')
 
     const accounts = Object.fromEntries(accountsByStatus.map((r) => [r.status, r._count._all])) as Record<string, number>
     const level = levelFor(levelActiveCount, levels)
 
     const commission = can.commissions ? await commissionFigures(commissionScope, range) : null
+
+    // ── Analytics: customer growth (last 6 months) ──────────────────────────
+    const periods = recentPeriods(6, periodMonthOf())
+    const sixMonthsAgo = dayStart(`${periods[0]}-01`)
+
+    const customersByMonth = await prisma.$queryRaw<{ month: string; count: bigint }[]>`
+      SELECT TO_CHAR("createdAt", 'YYYY-MM') as month, COUNT(*)::bigint as count
+      FROM customers
+      WHERE "resellerId" = ${resellerId}
+      AND "createdAt" >= ${sixMonthsAgo}
+      GROUP BY TO_CHAR("createdAt", 'YYYY-MM')
+      ORDER BY month ASC
+    `
+    const customerMap = new Map(customersByMonth.map((r) => [r.month, Number(r.count)]))
+    const customerGrowth = periods.map((m) => ({ month: m, count: customerMap.get(m) ?? 0 }))
+
+    // ── Analytics: commission earnings (last 6 months) ──────────────────────
+    let commissionEarnings: { month: string; earned: string; paid: string }[] | null = null
+    if (can.commissions) {
+      const [earnedRows, paidRows] = await Promise.all([
+        prisma.commission.groupBy({
+          by: ['periodMonth'],
+          where: {
+            resellerId,
+            entryType: 'EARNING',
+            status: { not: 'REVERSED' },
+            periodMonth: { in: periods },
+          },
+          _sum: { amount: true },
+        }),
+        prisma.commission.groupBy({
+          by: ['periodMonth'],
+          where: {
+            resellerId,
+            status: 'PAID',
+            periodMonth: { in: periods },
+          },
+          _sum: { amount: true },
+        }),
+      ])
+      const earnedMap = new Map(earnedRows.map((r) => [r.periodMonth, r._sum.amount ?? ZERO]))
+      const paidMap = new Map(paidRows.map((r) => [r.periodMonth, r._sum.amount ?? ZERO]))
+      commissionEarnings = periods.map((m) => ({
+        month: m,
+        earned: (earnedMap.get(m) ?? ZERO).toString(),
+        paid: (paidMap.get(m) ?? ZERO).toString(),
+      }))
+    }
 
     const [recentCustomers, recentTrials, recentActivations, recentCommissions] = await Promise.all([
       prisma.customer.findMany({
@@ -214,6 +262,10 @@ export const dashboardService = {
         activations: recentActivations,
         commissions: recentCommissions,
       },
+      analytics: {
+        customerGrowth,
+        commissionEarnings,
+      },
     }
   },
 }
@@ -238,6 +290,7 @@ export async function adminDashboard(req: Request) {
     trialCount,
     bankSlipCount,
     unreadNotifications,
+    pendingDemoRequests,
   ] = await Promise.all([
     prisma.reseller.groupBy({ by: ['status'], _count: { _all: true } }),
     prisma.customer.count({ where: { accounts: { some: { status: 'ACTIVE' } } } }),
@@ -253,6 +306,7 @@ export async function adminDashboard(req: Request) {
     prisma.trialRequest.count(),
     can('bankslips:read') ? prisma.bankSlip.count() : null,
     prisma.notification.count({ where: { userId, readAt: null } }),
+    can('demos:read') ? prisma.demoRequest.count({ where: { status: 'PENDING' } }) : null,
   ])
 
   const resellers = Object.fromEntries(resellersByStatus.map((r) => [r.status, r._count._all])) as Record<string, number>
@@ -355,6 +409,7 @@ export async function adminDashboard(req: Request) {
       openActivations: (open.PENDING_REVIEW ?? 0) + (open.UNDER_REVIEW ?? 0) + (open.APPROVED ?? 0),
       bankSlips: bankSlipCount,
       unreadNotifications,
+      pendingDemoRequests,
     },
   }
 }

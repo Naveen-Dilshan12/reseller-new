@@ -3,13 +3,16 @@ import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../../config/database'
 import { authenticate, requirePermission, resolveResellerId } from '../../middleware/auth.middleware'
+import { forbidden } from '../../middleware/error.middleware'
+import { isPlatformRole } from '../../rbac/permissions'
 import { validate } from '../../middleware/validate.middleware'
 import { asyncHandler } from '../../utils/async-handler'
 import { paginationSchema, toSkipTake } from '../../utils/pagination'
 import { sendPaginated } from '../../utils/response'
+import { activationStatusFilter } from './activation.schema'
 
 const listSchema = paginationSchema.extend({
-  status: z.string().regex(/^[A-Z_]+(,[A-Z_]+)*$/).optional(),
+  status: activationStatusFilter.optional(),
   resellerId: z.string().max(40).optional(),
   search: z.string().trim().max(100).optional(),
   duplicatesOnly: z.enum(['true', 'false']).optional(),
@@ -30,6 +33,10 @@ router.get(
   validate(listSchema, 'query'),
   asyncHandler(async (req, res) => {
     const q = req.query as unknown as z.infer<typeof listSchema>
+    // Duplicate-claim checks (the "used N×" count and the duplicates filter) are for Hexalyte staff. Resellers never see
+    // them, as on their own activation request screens, and must not learn that another reseller used the same file.
+    const staff = isPlatformRole(req.user!.role)
+    if (q.duplicatesOnly === 'true' && !staff) throw forbidden('Duplicate checks are available to Hexalyte staff only')
     const duplicateHashes =
       q.duplicatesOnly === 'true'
         ? (await prisma.bankSlip.groupBy({ by: ['sha256'], having: { sha256: { _count: { gt: 1 } } } })).map((g) => g.sha256)
@@ -84,6 +91,10 @@ router.get(
       }),
       prisma.bankSlip.count({ where }),
     ])
+    if (!staff) {
+      const items = rows.map(({ sha256: _hash, ...r }) => r)
+      return sendPaginated(res, items, total, q.page, q.limit)
+    }
     const counts = await prisma.bankSlip.groupBy({
       by: ['sha256'],
       where: { sha256: { in: rows.map((r) => r.sha256) } },

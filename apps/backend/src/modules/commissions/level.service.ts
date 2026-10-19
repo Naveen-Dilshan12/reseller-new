@@ -62,3 +62,12 @@ export async function recalculateResellerLevel(db: Prisma.TransactionClient, res
 export function calculateCommissionAmount(baseAmount: Prisma.Decimal, ratePercent: Prisma.Decimal): Prisma.Decimal {
   return baseAmount.mul(ratePercent).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
 }
+
+/**
+ * Splits one month's subscription price between the reseller (the configured level rate) and
+ * Hexalyte (everything else). The two amounts always add up to the price.
+ */
+export function splitSubscription(price: Prisma.Decimal, ratePercent: Prisma.Decimal) {
+  const resellerAmount = calculateCommissionAmount(price, ratePercent)
+  return { resellerAmount, hexalyteAmount: price.minus(resellerAmount) }
+}

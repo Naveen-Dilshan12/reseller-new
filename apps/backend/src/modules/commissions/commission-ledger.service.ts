@@ -4,7 +4,7 @@ import { env } from '../../config/env'
 import { conflict, notFoundError } from '../../middleware/error.middleware'
 import { toSkipTake } from '../../utils/pagination'
 import { periodMonthOf, recentPeriods } from '../../utils/period'
-import { calculateCommissionAmount, getLevels, levelFor } from './level.service'
+import { calculateCommissionAmount, getLevels, levelFor, splitSubscription } from './level.service'
 import type { ListCommissionsQuery } from './commission.schema'
 
 type Tx = Prisma.TransactionClient
@@ -68,18 +68,29 @@ export async function reverseEntry(tx: Tx, commission: Commission, reason: strin
   if (commission.status === 'REVERSED' || commission.reversedAt) throw conflict('Commission is already reversed')
 
   const now = new Date()
+  // The row was read a moment ago, so each write below carries the state it expects (one UPDATE … WHERE): a payout or
+  // another reversal may have committed in between, and an unconditional update would turn a just-paid row into
+  // REVERSED without a clawback, or overwrite the other admin's reversal.
+  const writeIf = async (expected: Pick<Prisma.CommissionWhereInput, 'status' | 'reversedAt'>, data: Prisma.CommissionUpdateInput) => {
+    try {
+      return await tx.commission.update({ where: { id: commission.id, ...expected }, data })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        throw conflict('This commission was changed by someone else (already reversed or paid). Reload the list and check its status.')
+      }
+      throw err
+    }
+  }
+
   if (commission.status !== 'PAID') {
-    const updated = await tx.commission.update({
-      where: { id: commission.id },
-      data: { status: 'REVERSED', reversedAt: now, reversedById: userId, reversalReason: reason },
-    })
+    const updated = await writeIf(
+      { status: { notIn: ['PAID', 'REVERSED'] }, reversedAt: null },
+      { status: 'REVERSED', reversedAt: now, reversedById: userId, reversalReason: reason },
+    )
     return { reversed: updated, clawback: null }
   }
 
-  const reversed = await tx.commission.update({
-    where: { id: commission.id },
-    data: { reversedAt: now, reversedById: userId, reversalReason: reason },
-  })
+  const reversed = await writeIf({ status: 'PAID', reversedAt: null }, { reversedAt: now, reversedById: userId, reversalReason: reason })
   const clawback = await tx.commission.create({
     data: {
       resellerId: commission.resellerId,
@@ -157,7 +168,8 @@ export const commissionLedgerService = {
       periodMonth: query.periodMonth,
     }
     const [items, total, sum] = await Promise.all([
-      prisma.commission.findMany({ where, include: listInclude, orderBy: [{ createdAt: 'desc' }], ...toSkipTake(query) }),
+      // `id` breaks ties between rows created in the same instant, so no row is repeated or skipped across pages.
+      prisma.commission.findMany({ where, include: listInclude, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], ...toSkipTake(query) }),
       prisma.commission.count({ where }),
       prisma.commission.aggregate({ where: { ...where, status: query.status ?? { not: 'REVERSED' } }, _sum: { amount: true } }),
     ])
@@ -189,7 +201,7 @@ export const commissionLedgerService = {
       }),
       prisma.resellerLevelChange.findMany({ where: { resellerId }, orderBy: { createdAt: 'desc' }, take: 10 }),
     ])
-    if (!reseller) throw notFoundError('Reseller')
+    if (!reseller) throw notFoundError('Partner')
 
     const level = levelFor(activeCustomerCount, levels)
     // With no active customers yet, show what the first customer would earn.
@@ -200,13 +212,20 @@ export const commissionLedgerService = {
       reseller,
       level: { ...level, effectiveRatePercent: effectiveRate },
       levels,
-      commissionPerCustomer: products.map((p) => ({
-        product: p.name,
-        productCode: p.code,
-        baseAmount: p.monthlyPrice,
-        currency: p.currency,
-        amount: calculateCommissionAmount(p.monthlyPrice, effectiveRate),
-      })),
+      // Per product, at the seller's current level: `amount` is the reseller's commission and
+      // `hexalyteAmount` is what Hexalyte keeps of the monthly subscription price.
+      commissionPerCustomer: products.map((p) => {
+        const split = splitSubscription(p.monthlyPrice, effectiveRate)
+        return {
+          product: p.name,
+          productCode: p.code,
+          baseAmount: p.monthlyPrice,
+          currency: p.currency,
+          ratePercent: effectiveRate,
+          amount: split.resellerAmount,
+          hexalyteAmount: split.hexalyteAmount,
+        }
+      }),
       totals: sumByStatus(byStatus),
       currentMonth: { periodMonth: period, earnings: monthly.get(period) ?? ZERO },
       monthlyEarnings: periods.map((p) => ({ periodMonth: p, earnings: monthly.get(p) ?? ZERO })),
@@ -288,7 +307,8 @@ export const commissionLedgerService = {
     })
     const customers = await prisma.commission.groupBy({
       by: ['resellerId'],
-      where: { periodMonth: month, entryType: 'EARNING', status: { not: 'REVERSED' } },
+      // A live earning: not reversed, and not refunded after payout (that one stays PAID but is recovered by a clawback).
+      where: { periodMonth: month, entryType: 'EARNING', status: { not: 'REVERSED' }, reversedAt: null },
       _count: { customerAccountId: true },
     })
     const resellerIds = [...new Set(grouped.map((g) => g.resellerId))]

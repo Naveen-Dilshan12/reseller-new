@@ -6,6 +6,7 @@ import { auditService } from '../audit-logs/audit.service'
 import { notificationService } from '../notifications/notification.service'
 import { createEarning, reverseEntry } from './commission-ledger.service'
 import { recalculateResellerLevel } from './level.service'
+import { assertManualEventAllowed } from './subscription-event-rules'
 import type { RecordSubscriptionEventInput } from './commission.schema'
 
 export interface EventContext {
@@ -24,12 +25,18 @@ export interface EventContext {
  * - CANCELLED: customer stops counting as active; earned commission is kept.
  * - REFUNDED: that month's commission is reversed (clawed back if already paid)
  *   and, unless `endSubscription` is false, the customer is deactivated.
+ *
+ * Events recorded by hand by an admin (source ADMIN) are first checked against
+ * `assertManualEventAllowed` (state, tenant, billing month, open activation requests,
+ * matching payment for a refund). Events from the activation flow are not: it has
+ * validated its own request, and its call must work while that request is open.
  */
 export async function applySubscriptionEvent(tx: Prisma.TransactionClient, input: RecordSubscriptionEventInput, ctx: EventContext) {
   const userId = ctx.req?.user?.userId ?? null
 
   const account = await tx.customerAccount.findUnique({ where: { id: input.customerAccountId }, include: { product: true, customer: { select: { displayName: true } } } })
   if (!account) throw notFoundError('Customer account')
+  const manual = ctx.source === 'ADMIN' ? await assertManualEventAllowed(tx, account, input) : null
 
   let event
   try {
@@ -54,14 +61,27 @@ export async function applySubscriptionEvent(tx: Prisma.TransactionClient, input
   const now = new Date()
   let commission = null
   let reversals: Awaited<ReturnType<typeof reverseEntry>>[] = []
-  const deactivate = input.type === 'CANCELLED' || (input.type === 'REFUNDED' && input.endSubscription !== false)
+  const deactivate = manual ? manual.endsSubscription : input.type === 'CANCELLED' || (input.type === 'REFUNDED' && input.endSubscription !== false)
+  let accountStatus = account.status
+  let subscriptionEnded = false
 
   if (input.type === 'PAYMENT_VERIFIED') {
+    accountStatus = 'ACTIVE'
     await tx.customerAccount.update({
       where: { id: account.id },
       data: { status: 'ACTIVE', activatedAt: account.activatedAt ?? now, deactivatedAt: null },
     })
+    await tx.trialRequest.updateMany({
+      where: { customerAccountId: account.id, status: { in: ['SUBMITTED', 'PENDING'] } },
+      data: {
+        status: 'PROVISIONED',
+        completedAt: now,
+        saasReference: account.externalTenantId ?? input.externalRef ?? undefined,
+      },
+    })
   } else if (deactivate && account.status !== 'CANCELLED') {
+    accountStatus = 'CANCELLED'
+    subscriptionEnded = true
     await tx.customerAccount.update({
       where: { id: account.id },
       data: { status: 'CANCELLED', deactivatedAt: now },
@@ -120,7 +140,7 @@ export async function applySubscriptionEvent(tx: Prisma.TransactionClient, input
   else if (ctx.productCode) await auditService.saas(ctx.productCode, audit, tx)
   else await auditService.system(audit, tx)
 
-  return { account, event, commission, reversals, level }
+  return { account, event, commission, reversals, level, accountStatus, subscriptionEnded }
 }
 
 export type AppliedSubscriptionEvent = Awaited<ReturnType<typeof applySubscriptionEvent>>
@@ -164,6 +184,9 @@ export function summariseSubscriptionEvent(result: AppliedSubscriptionEvent) {
     commission,
     reversed: reversals.map((r) => ({ id: r.reversed.id, clawbackId: r.clawback?.id ?? null })),
     level: { level: level.level, ratePercent: level.ratePercent, activeCustomerCount: level.activeCustomerCount, changed: level.changed },
+    /** The account's status after this event, and whether this event is what ended the subscription. */
+    accountStatus: result.accountStatus,
+    subscriptionEnded: result.subscriptionEnded,
   }
 }
 

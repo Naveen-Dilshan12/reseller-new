@@ -9,12 +9,17 @@ import { sendPaginated, sendSuccess } from '../../utils/response'
 import { integrationRegistry } from '../integrations/integration-registry'
 import { integrationService } from '../integrations/integration.service'
 import {
+  comingSoonProductSchema,
   createProductSchema,
   integrationLogsSchema,
+  launchProductSchema,
+  restoreProductSchema,
+  retireProductSchema,
   setAccessSchema,
   updateIntegrationSchema,
   updateProductSchema,
 } from './product.schema'
+import { productLifecycleService } from './product-lifecycle.service'
 import { productService } from './product.service'
 import { resellerAccessService } from './reseller-access.service'
 
@@ -60,6 +65,49 @@ adminProductsRouter.patch(
   requirePermission('products:manage'),
   validate(updateProductSchema),
   asyncHandler(async (req, res) => sendSuccess(res, await productService.update(req.params.id, req.body, req), 'Product updated')),
+)
+
+/** Lifecycle: counts of what retiring / restoring touches, shown before the admin confirms. */
+adminProductsRouter.get(
+  '/:id/impact',
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.impact(req.params.id))),
+)
+
+adminProductsRouter.post(
+  '/:id/retire',
+  requirePermission('products:manage'),
+  validate(retireProductSchema),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.retire(req.params.id, req.body, req), 'Product retired')),
+)
+
+adminProductsRouter.post(
+  '/:id/restore',
+  requirePermission('products:manage'),
+  validate(restoreProductSchema),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.restore(req.params.id, req.body, req), 'Product restored')),
+)
+
+/** Coming soon: ACTIVE | INACTIVE → COMING_SOON (reason required), and launch: COMING_SOON → ACTIVE (note optional). */
+adminProductsRouter.post(
+  '/:id/coming-soon',
+  requirePermission('products:manage'),
+  validate(comingSoonProductSchema),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.comingSoon(req.params.id, req.body, req), 'Product set to coming soon')),
+)
+
+adminProductsRouter.post(
+  '/:id/launch',
+  requirePermission('products:manage'),
+  validate(launchProductSchema),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.launch(req.params.id, req.body, req), 'Product launched')),
+)
+
+/** Read-only review of approved resellers without access; it lists reseller names, so it also needs resellers:read. */
+adminProductsRouter.get(
+  '/:id/resellers-without-access',
+  requirePermission('products:manage', 'resellers:read'),
+  asyncHandler(async (req, res) => sendSuccess(res, await productLifecycleService.resellersWithoutAccess(req.params.id))),
 )
 
 adminProductsRouter.put(

@@ -13,25 +13,31 @@ const ZERO = new Prisma.Decimal(0)
 
 export const commissionActionsService = {
   /** PENDING → APPROVED, or straight to PAYABLE when the hold period has already ended. */
-  async approve(req: Request, ids: string[]) {
+  async approve(req: Request, requestedIds: string[]) {
     const user = currentUser(req)
+    const ids = [...new Set(requestedIds)] // an id sent twice is one entry, not one approved and one "skipped"
     const now = new Date()
     const base = { id: { in: ids }, status: 'PENDING' as const }
     const data = { approvedAt: now, approvedById: user.userId }
 
-    const [payable, approved] = await prisma.$transaction([
-      prisma.commission.updateMany({ where: { ...base, payableAt: { lte: now } }, data: { ...data, status: 'PAYABLE' } }),
-      prisma.commission.updateMany({ where: { ...base, payableAt: { gt: now } }, data: { ...data, status: 'APPROVED' } }),
-    ])
-    const count = payable.count + approved.count
-    if (count === 0) throw conflict('No pending commissions found in the selection')
+    // The status changes and their audit entry commit together: an approval is never left without its audit record.
+    return prisma.$transaction(async (tx) => {
+      const payable = await tx.commission.updateMany({ where: { ...base, payableAt: { lte: now } }, data: { ...data, status: 'PAYABLE' } })
+      const approved = await tx.commission.updateMany({ where: { ...base, payableAt: { gt: now } }, data: { ...data, status: 'APPROVED' } })
+      const count = payable.count + approved.count
+      if (count === 0) throw conflict('No pending commissions found in the selection')
 
-    await auditService.fromRequest(req, {
-      action: 'COMMISSION_APPROVED',
-      entityType: 'Commission',
-      metadata: { ids, approved: approved.count, payable: payable.count },
+      await auditService.fromRequest(
+        req,
+        {
+          action: 'COMMISSION_APPROVED',
+          entityType: 'Commission',
+          metadata: { ids, approved: approved.count, payable: payable.count, skipped: ids.length - count },
+        },
+        tx,
+      )
+      return { approved: approved.count, payable: payable.count, skipped: ids.length - count }
     })
-    return { approved: approved.count, payable: payable.count, skipped: ids.length - count }
   },
 
   async reverse(req: Request, id: string, reason: string) {
@@ -68,7 +74,7 @@ export const commissionActionsService = {
 
     const payout = await prisma.$transaction(async (tx) => {
       const reseller = await tx.reseller.findUnique({ where: { id: input.resellerId }, select: { id: true } })
-      if (!reseller) throw notFoundError('Reseller')
+      if (!reseller) throw notFoundError('Partner')
       await promotePayable(tx)
 
       const entries = await tx.commission.findMany({
@@ -82,7 +88,7 @@ export const commissionActionsService = {
       if (input.commissionIds && entries.length !== input.commissionIds.length) {
         throw conflict('Some selected commissions are not payable (not approved, still on hold, or already paid)')
       }
-      if (entries.length === 0) throw badRequest('There are no payable commissions for this reseller')
+      if (entries.length === 0) throw badRequest('There are no payable commissions for this partner')
 
       const total = entries.reduce((s, e) => s.add(e.amount), ZERO)
       if (total.lte(0)) throw badRequest('Payable total must be greater than zero (clawbacks exceed earnings)')
@@ -134,7 +140,8 @@ export const commissionActionsService = {
       prisma.commissionPayout.findMany({
         where,
         include: { reseller: { select: { code: true, businessName: true } }, _count: { select: { commissions: true } } },
-        orderBy: { paidAt: 'desc' },
+        // Payments are dated by day, so many share a paidAt: createdAt and id keep the pages from repeating or skipping any.
+        orderBy: [{ paidAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
         ...toSkipTake(query),
       }),
       prisma.commissionPayout.count({ where }),
