@@ -15,8 +15,18 @@ import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import type { AddressInfo } from 'node:net'
+import { disposableDatabaseUrl } from '../tests/helpers/disposable-database'
 
-const DB = process.env.E2E_DATABASE_URL
+// Local, disposable databases only (see tests/helpers/disposable-database.ts). DATABASE_URL is overwritten below before anything that
+// reads it is imported, so only E2E_DATABASE_URL itself is checked.
+const DB = (() => {
+  try {
+    return disposableDatabaseUrl(process.env, { requireSameDatabaseUrl: false })
+  } catch (err) {
+    console.error((err as Error).message)
+    return process.exit(2)
+  }
+})()
 const ADMIN_EMAIL = process.env.DEMO_ADMIN_EMAIL
 const ADMIN_PASSWORD = process.env.DEMO_ADMIN_PASSWORD
 if (!DB || !ADMIN_EMAIL || !ADMIN_PASSWORD) {

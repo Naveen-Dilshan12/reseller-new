@@ -21,7 +21,7 @@ describe('Zod Validation Schemas', () => {
         businessRegistrationNo: 'PV12345',
         businessAddress: '12 Temple Road, Colombo',
         businessPhone: '0112345678',
-        businessEmail: 'biz@nimal.lk',
+        businessEmail: 'biz@nimal.test',
       },
       bank: {
         bankName: 'Commercial Bank',
@@ -44,8 +44,8 @@ describe('Zod Validation Schemas', () => {
 
   it('should reject passwords that do not match confirmation', () => {
     const data = {
-      personal: { fullName: 'Test', nicOrPassport: '123456789V', email: 'test@a.lk', mobile: '0771234567', address: 'Addr 123' },
-      business: { businessName: 'Biz', businessRegistrationNo: 'PV999', businessAddress: 'Addr', businessPhone: '0112345678', businessEmail: 'b@a.lk' },
+      personal: { fullName: 'Test', nicOrPassport: '123456789V', email: 'test@a.test', mobile: '0771234567', address: 'Addr 123' },
+      business: { businessName: 'Biz', businessRegistrationNo: 'PV999', businessAddress: 'Addr', businessPhone: '0112345678', businessEmail: 'b@a.test' },
       bank: { bankName: 'Bank', branch: 'Branch', accountHolderName: 'Holder', accountNumber: '1234567' },
       password: 'Password123A',
       confirmPassword: 'DifferentPassword123A',
@@ -101,7 +101,7 @@ describe('Zod Validation Schemas', () => {
       owner: {
         businessName: 'Super Store',
         contactName: 'Kasun Silva',
-        contactEmail: 'kasun@superstore.lk',
+        contactEmail: 'kasun@superstore.test',
         contactPhone: '0712345678',
       },
     }
