@@ -12,3 +12,18 @@ coverage/
 next-env.d.ts
 *.log
 .env.*.local
+
+# Local-only artefacts: never part of a release.
+screenshot.png
+# Database-connected diagnostic / manual QA scripts (they read or write whatever DATABASE_URL points at).
+apps/backend/scripts/diagnose-reseller-flow.ts
+apps/backend/scripts/inspect-*.ts
+apps/backend/scripts/manual-qa-e2e-audit.ts
+apps/backend/scripts/test-email-verification-flow.ts
+apps/backend/scripts/test-journey-flow.ts
+apps/backend/scripts/test-otp-ui-and-dev-mode.ts
+apps/backend/scripts/test-registration-flow.ts
+apps/backend/scripts/verify-hierarchy-and-lifecycle.ts
+# Superseded working notes (findings fixed; contents folded into docs/). Not part of a release.
+AUDIT.md
+deploy/proposed-patches/

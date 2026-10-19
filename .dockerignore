@@ -1,0 +1,23 @@
+# The deployment images use the repository root as build context (the lockfile lives here), so this file is what keeps
+# secrets, local state and build output from being sent to the Docker daemon at all.
+.git
+**/node_modules
+**/dist
+**/.next
+**/*.tsbuildinfo
+**/uploads
+**/coverage
+
+# Real environment files and secrets (only *.example templates are meant to be in the context)
+**/.env
+**/.env.*
+!**/.env.example
+deploy/secrets
+deploy/compose.env
+deploy/env.production
+
+# Not needed to build
+screenshot.png
+AUDIT.md
+docs
+**/tests

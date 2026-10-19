@@ -1,0 +1,17 @@
+# Normalise line endings in the repository to LF; avoids CRLF churn on Windows checkouts.
+* text=auto eol=lf
+
+# Shell scripts run inside Linux containers / on the VPS: must never get CRLF.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf
+*.sql text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
