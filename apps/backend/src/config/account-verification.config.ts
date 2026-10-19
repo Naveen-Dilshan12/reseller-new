@@ -10,7 +10,7 @@
  *
  * Legacy access is NOT proof of anything: it never sets or implies `emailVerified` or `phoneVerifiedAt`.
  */
-export const ACCOUNT_VERIFICATION_REQUIRED_FROM = 'UNCONFIRMED-SET-DEPLOYMENT-TIMESTAMP'
+export const ACCOUNT_VERIFICATION_REQUIRED_FROM = '2026-10-19T18:00:00+05:30'
 
 export function parseVerificationCutoff(raw: string): Date | null {
   // Require an explicit UTC offset so the instant never depends on the server's timezone.
