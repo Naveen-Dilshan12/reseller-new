@@ -15,13 +15,20 @@ export const ACTIVATION_STATUS_LABELS: Record<ActivationStatus, string> = {
   CANCELLED: 'Cancelled',
 }
 
+export interface ActivationPipelineCounts {
+  total: number
+  pendingReview: number
+  underReview: number
+  completed: number
+}
+
 export const ACTION_LABELS: Record<string, string> = {
   SUBMITTED: 'Request submitted',
   REVIEW_STARTED: 'Review started',
   PAYMENT_VERIFIED: 'Payment verified',
   APPROVED: 'Approved',
   REJECTED: 'Rejected',
-  CANCELLED: 'Cancelled by reseller',
+  CANCELLED: 'Cancelled by partner',
   SAAS_PENDING: 'SaaS processing activation',
   SAAS_FAILED: 'SaaS activation failed',
   COMPLETED: 'Subscription activated',

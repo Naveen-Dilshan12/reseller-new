@@ -1,9 +1,15 @@
 'use client'
 
+import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { isPlatformUser, logout, useCurrentUser } from '@/lib/auth'
 import { AdminUserContext } from '@/lib/admin-context'
+import { ThemeToggle } from '@/components/ThemeToggle'
+import { PlatformLogo } from '@/components/PlatformLogo'
+import { NotificationBell } from '@/components/notifications/NotificationBell'
+import { useAppearance } from '@/lib/appearance'
+import { roleLabel } from '@/lib/role-label'
 
 interface NavGroup {
   title: string
@@ -49,15 +55,17 @@ const ICONS = {
       <circle cx="12" cy="7" r="4" />
     </svg>
   ),
-  trials: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-    </svg>
-  ),
   activations: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
       <path d="m9 12 2 2 4-4" />
+    </svg>
+  ),
+  demos: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18" />
+      <path d="m9 15 2 2 4-4" />
     </svg>
   ),
   bankSlips: (
@@ -98,9 +106,9 @@ const GROUPS: NavGroup[] = [
     items: [{ href: '/admin', label: 'Dashboard', icon: ICONS.dashboard }],
   },
   {
-    title: 'Reseller Network',
+    title: 'Partner Network',
     items: [
-      { href: '/admin/resellers', label: 'Resellers', permission: 'resellers:read', match: ['/admin/reseller-applications'], icon: ICONS.resellers },
+      { href: '/admin/resellers', label: 'Partners', permission: 'resellers:read', match: ['/admin/reseller-applications'], icon: ICONS.resellers },
       { href: '/admin/products', label: 'SaaS Products', permission: 'products:manage', icon: ICONS.products },
       { href: '/admin/customer-accounts', label: 'Customers & Mapping', permission: 'accounts:read', icon: ICONS.customers },
     ],
@@ -108,8 +116,8 @@ const GROUPS: NavGroup[] = [
   {
     title: 'Operations & Billing',
     items: [
-      { href: '/admin/trials', label: 'Trial Requests', permission: 'trials:read', icon: ICONS.trials },
       { href: '/admin/activations', label: 'Activation Requests', permission: 'activations:read', icon: ICONS.activations },
+      { href: '/admin/demo-requests', label: 'Demo Requests', permission: 'demos:read', icon: ICONS.demos },
       { href: '/admin/bank-slips', label: 'Bank Slips Register', permission: 'bankslips:read', icon: ICONS.bankSlips },
       { href: '/admin/commissions', label: 'Commissions & Payouts', permission: 'commissions:read', icon: ICONS.commissions },
     ],
@@ -124,6 +132,12 @@ const GROUPS: NavGroup[] = [
   },
 ]
 
+/**
+ * Up to this width the sidebar is a drawer opened from the header's menu button; above it, the fixed sidebar. Keep it equal to the
+ * `max-width` of the "Admin shell" rules in globals.css (a test compares the two).
+ */
+const DRAWER_QUERY = '(max-width: 1024px)'
+
 function isActive(pathname: string, item: NavItem) {
   if (item.href === '/admin') return pathname === '/admin'
   return [item.href, ...(item.match ?? [])].some((p) => pathname === p || pathname.startsWith(`${p}/`))
@@ -133,6 +147,51 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const user = useCurrentUser(isPlatformUser)
   const pathname = usePathname()
   const router = useRouter()
+  // Loads the shared appearance (default color mode for admins who have not chosen one) once signed in.
+  useAppearance()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const sidebar = useRef<HTMLElement>(null)
+
+  // Going to another page closes the drawer (links also close it themselves, for a link to the page already open).
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [pathname])
+
+  // While the drawer is open: focus moves into it; Escape closes it and returns focus to the menu button; Tab stays between the menu
+  // button and the drawer's links; the page behind does not scroll; and growing to a desktop width closes it (the sidebar is then
+  // permanent, so nothing may stay locked).
+  useEffect(() => {
+    if (!menuOpen) return
+    const links = () => Array.from(sidebar.current?.querySelectorAll<HTMLElement>('a[href]') ?? [])
+    links()[0]?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false)
+        menuButton.current?.focus()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const ring = [menuButton.current, ...links()].filter((el): el is HTMLElement => Boolean(el))
+      const at = ring.indexOf(document.activeElement as HTMLElement)
+      const next = at === -1 ? 0 : (at + (event.shiftKey ? -1 : 1) + ring.length) % ring.length
+      event.preventDefault()
+      ring[next]?.focus()
+    }
+    const media = typeof window.matchMedia === 'function' ? window.matchMedia(DRAWER_QUERY) : null
+    const onChange = () => {
+      if (media && !media.matches) setMenuOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    media?.addEventListener('change', onChange)
+    const scrollBefore = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      media?.removeEventListener('change', onChange)
+      document.body.style.overflow = scrollBefore
+    }
+  }, [menuOpen])
   if (!user) return null
 
   const initials = user.name
@@ -146,62 +205,94 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   return (
     <AdminUserContext.Provider value={user}>
-      {/* Top Header - Sleek Dark Glass */}
+      {/* Top Header */}
       <header
+        className="admin-header"
         style={{
           position: 'sticky',
           top: 0,
           zIndex: 40,
-          background: 'rgba(8, 12, 20, 0.85)',
+          background: 'var(--header-bg)',
           backdropFilter: 'blur(16px)',
           WebkitBackdropFilter: 'blur(16px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+          borderBottom: '1px solid var(--border)',
           height: '64px',
           display: 'flex',
           alignItems: 'center',
-          padding: '0 1.5rem',
+          // horizontal padding comes from .admin-header (it shrinks on small screens)
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', width: '250px' }}>
-          <div
-            style={{
-              width: '34px',
-              height: '34px',
-              borderRadius: '9px',
-              background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)',
-              color: '#fff',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 800,
-              fontSize: '1rem',
-              boxShadow: '0 0 18px rgba(99, 102, 241, 0.4)',
-            }}
-          >
-            H
-          </div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: '0.98rem', color: '#ffffff', letterSpacing: '-0.02em' }}>
+        {/* Opens the sidebar drawer; only shown on tablets and phones (see "Admin shell" in globals.css). */}
+        <button
+          ref={menuButton}
+          type="button"
+          className="admin-menu-btn"
+          aria-label="Admin navigation menu"
+          aria-expanded={menuOpen}
+          aria-controls="admin-sidebar"
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          {menuOpen ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          )}
+        </button>
+
+        <div className="admin-header-brand">
+          <PlatformLogo
+            size={34}
+            radius={9}
+            fallback={
+              <div
+                style={{
+                  width: '34px',
+                  height: '34px',
+                  borderRadius: '9px',
+                  background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 800,
+                  fontSize: '1rem',
+                  boxShadow: '0 0 18px rgba(99, 102, 241, 0.35)',
+                }}
+              >
+                H
+              </div>
+            }
+          />
+          <div className="admin-header-brand-text">
+            <div style={{ fontWeight: 800, fontSize: '0.98rem', color: 'var(--text-heading)', letterSpacing: '-0.02em' }}>
               Hexalyte Admin
             </div>
-            <div style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 500 }}>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted)', fontWeight: 500 }}>
               Central Platform
             </div>
           </div>
         </div>
 
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0 }}>
           <div
+            className="admin-header-status"
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: '0.45rem',
-              background: 'rgba(255, 255, 255, 0.04)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              background: 'var(--badge-bg-subtle)',
+              border: '1px solid var(--border)',
               padding: '0.35rem 0.75rem',
               borderRadius: '20px',
               fontSize: '0.75rem',
-              color: '#94a3b8',
+              color: 'var(--muted)',
               fontWeight: 600,
             }}
           >
@@ -210,59 +301,22 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <Link
-            href="/admin/notifications"
-            style={{
-              position: 'relative',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '38px',
-              height: '38px',
-              borderRadius: '9px',
-              background: 'rgba(255, 255, 255, 0.04)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              color: '#cbd5e1',
-            }}
-            title="Notifications"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-              <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-            </svg>
-            <span
-              style={{
-                position: 'absolute',
-                top: '-3px',
-                right: '-3px',
-                background: '#ef4444',
-                color: '#fff',
-                fontSize: '0.65rem',
-                fontWeight: 800,
-                width: '18px',
-                height: '18px',
-                borderRadius: '50%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                border: '2px solid #080c14',
-                boxShadow: '0 0 8px rgba(239, 68, 68, 0.6)',
-              }}
-            >
-              3
-            </span>
-          </Link>
+        <div className="admin-header-controls">
+          <ThemeToggle className="admin-header-theme" />
+
+          {/* Real unread count from GET /notifications/unread-count; the badge is hidden at 0 or if it cannot be loaded. */}
+          <NotificationBell href="/admin/notifications" />
 
           <div
+            className="admin-header-user"
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '0.65rem',
               padding: '0.35rem 0.65rem',
               borderRadius: '9px',
-              background: 'rgba(255, 255, 255, 0.04)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              background: 'var(--badge-bg-subtle)',
+              border: '1px solid var(--border)',
             }}
           >
             <div
@@ -281,9 +335,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             >
               {initials}
             </div>
-            <div>
-              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc' }}>{user.name}</div>
-              <div style={{ fontSize: '0.68rem', color: '#34d399', fontWeight: 700 }}>SUPER ADMIN</div>
+            <div className="admin-header-user-text">
+              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-heading)' }}>{user.name}</div>
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase' }}>{roleLabel(user.role)}</div>
             </div>
           </div>
 
@@ -299,14 +353,30 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </div>
       </header>
 
+      {/* Dims the page behind the open drawer (tablets and phones only); a tap on it closes the drawer. Under the header, so the menu button stays reachable. */}
+      {menuOpen && (
+        <div
+          className="admin-drawer-backdrop"
+          onClick={() => {
+            setMenuOpen(false)
+            menuButton.current?.focus()
+          }}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Main Container with Sidebar */}
       <div style={{ display: 'flex', minHeight: 'calc(100vh - 64px)' }}>
-        {/* Dark Modern Cyber Sidebar */}
-        <aside
+        {/* Dark Modern Cyber Sidebar: fixed on desktop, a slide-in drawer on tablets and phones */}
+        <nav
+          id="admin-sidebar"
+          ref={sidebar}
+          aria-label="Admin navigation"
+          className={`admin-sidebar${menuOpen ? ' open' : ''}`}
           style={{
-            width: '260px',
-            background: '#090d16',
-            borderRight: '1px solid rgba(255, 255, 255, 0.08)',
+            // position / size / stacking / transitions come from .admin-sidebar (fixed under the header)
+            background: 'var(--sidebar-bg)',
+            borderRight: '1px solid var(--border)',
             padding: '1.5rem 0.85rem',
             display: 'flex',
             flexDirection: 'column',
@@ -325,7 +395,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     fontWeight: 800,
                     textTransform: 'uppercase',
                     letterSpacing: '0.06em',
-                    color: '#64748b',
+                    color: 'var(--muted)',
                     padding: '0 0.75rem 0.5rem',
                   }}
                 >
@@ -338,6 +408,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                       <Link
                         key={item.href}
                         href={item.href}
+                        onClick={() => setMenuOpen(false)}
+                        aria-current={active ? 'page' : undefined}
                         style={{
                           display: 'flex',
                           alignItems: 'center',
@@ -346,14 +418,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                           borderRadius: '9px',
                           fontSize: '0.88rem',
                           fontWeight: active ? 700 : 500,
-                          color: active ? '#a5b4fc' : '#94a3b8',
-                          background: active ? 'linear-gradient(135deg, rgba(79, 70, 229, 0.25) 0%, rgba(139, 92, 246, 0.15) 100%)' : 'transparent',
+                          color: active ? 'var(--primary)' : 'var(--text-secondary)',
+                          background: active ? 'linear-gradient(135deg, rgba(79, 70, 229, 0.16) 0%, rgba(139, 92, 246, 0.10) 100%)' : 'transparent',
                           border: active ? '1px solid rgba(99, 102, 241, 0.35)' : '1px solid transparent',
-                          boxShadow: active ? '0 0 15px rgba(99, 102, 241, 0.12)' : 'none',
-                          transition: 'all 0.15s ease',
+                          boxShadow: active ? '0 0 12px rgba(99, 102, 241, 0.12)' : 'none',
+                          // not `all`: that would also animate the inherited visibility of a closing/opening drawer, and a link still
+                          // "hidden" for that first frame cannot take focus
+                          transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
                         }}
                       >
-                        <span style={{ color: active ? '#818cf8' : '#64748b', display: 'flex' }}>
+                        <span style={{ color: active ? 'var(--primary)' : 'var(--muted)', display: 'flex' }}>
                           {item.icon}
                         </span>
                         {item.label}
@@ -364,10 +438,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
               </div>
             )
           })}
-        </aside>
+        </nav>
 
-        {/* Content Area */}
-        <div className="admin-content" style={{ flex: 1, minWidth: 0, padding: '1.75rem 2.25rem', background: '#080b11' }}>
+        {/* Content Area. Padding comes from .admin-content (it shrinks on small screens); `inert` keeps keyboard focus out of the page behind an open drawer. */}
+        <div className="admin-content" inert={menuOpen || undefined} style={{ flex: 1, minWidth: 0, background: 'var(--bg)', transition: 'background 0.2s ease' }}>
           {children}
         </div>
       </div>

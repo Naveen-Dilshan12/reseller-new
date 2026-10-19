@@ -34,30 +34,47 @@ export function MonthlyReport({ resellerId, adminLinks }: { resellerId?: string;
   const [month, setMonth] = useState(currentPeriod())
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
+    let stale = false
     const params = new URLSearchParams({ month })
     if (resellerId) params.set('resellerId', resellerId)
+    // Figures belong to one month: clear the previous ones so they are never shown under another month's label.
+    setReport(null)
+    setError(null)
     api<Report>(`/commissions/monthly-report?${params}`)
       .then((r) => {
-        setReport(r)
-        setError(null)
+        if (!stale) setReport(r)
       })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load report'))
-  }, [month, resellerId])
+      .catch((err) => {
+        if (!stale) setError(err instanceof ApiError ? err.message : 'Failed to load report')
+      })
+    // An answer for a month the user has already left must not replace the current one.
+    return () => {
+      stale = true
+    }
+  }, [month, resellerId, attempt])
 
   return (
     <div>
-      <div className="row" style={{ marginBottom: '0.75rem' }}>
+      <div className="filter-bar">
         <div className="field inline">
           <label htmlFor="report-month">Month</label>
           <input id="report-month" type="month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} />
         </div>
         <strong>{monthLabel(month)}</strong>
       </div>
-      {error && <div className="alert error">{error}</div>}
+      {error && (
+        <div className="alert error">
+          {error}{' '}
+          <button className="btn secondary small" onClick={() => setAttempt((n) => n + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
       {!report ? (
-        <p className="muted">Loading…</p>
+        error ? null : <p className="muted">Loading…</p>
       ) : (
         <>
           <Totals totals={report.totals} />
@@ -69,11 +86,12 @@ export function MonthlyReport({ resellerId, adminLinks }: { resellerId?: string;
                 <table>
                   <thead>
                     <tr>
-                      <th>Reseller</th>
+                      <th>Partner</th>
                       <th>Level</th>
                       <th>Active now</th>
                       <th>Customers earned</th>
                       <th style={{ textAlign: 'right' }}>Pending</th>
+                      <th style={{ textAlign: 'right' }}>Approved</th>
                       <th style={{ textAlign: 'right' }}>Payable</th>
                       <th style={{ textAlign: 'right' }}>Paid</th>
                       <th style={{ textAlign: 'right' }}>Reversed</th>
@@ -95,6 +113,7 @@ export function MonthlyReport({ resellerId, adminLinks }: { resellerId?: string;
                         <td>{r.reseller.activeCustomerCount}</td>
                         <td>{r.paidCustomers}</td>
                         <td style={{ textAlign: 'right' }}>{formatMoney(r.totals.pending)}</td>
+                        <td style={{ textAlign: 'right' }}>{formatMoney(r.totals.approved)}</td>
                         <td style={{ textAlign: 'right' }}>{formatMoney(r.totals.payable)}</td>
                         <td style={{ textAlign: 'right' }}>{formatMoney(r.totals.paid)}</td>
                         <td style={{ textAlign: 'right' }}>{formatMoney(r.totals.reversed)}</td>

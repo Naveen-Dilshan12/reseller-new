@@ -7,6 +7,7 @@ import { api, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
 import { formatDate, formatMoney } from '@/lib/format'
 import { PRODUCT_STATUS_LABELS, type AccessStatus, type Product } from '@/lib/product-types'
+import { Modal } from '@/components/ui/Modal'
 
 interface AccessRow {
   product: Product
@@ -37,8 +38,9 @@ export default function ResellerProductAccessPage() {
 
   useEffect(() => {
     load()
-    api<{ code: string; business: { businessName: string } }>(`/admin/reseller-applications/${id}`)
-      .then((r) => setReseller({ code: r.code, businessName: r.business.businessName }))
+    // Identity only: the application profile also returns NIC/address and is audited on every view.
+    api<{ code: string; businessName: string }>(`/admin/resellers/${id}`)
+      .then((r) => setReseller({ code: r.code, businessName: r.businessName }))
       .catch(() => setReseller(null))
   }, [id, load])
 
@@ -66,7 +68,7 @@ export default function ResellerProductAccessPage() {
   return (
     <main className="container">
       <Link href={`/admin/reseller-applications/${id}`} className="small">
-        ← Reseller profile
+        ← Partner profile
       </Link>
       <div className="row" style={{ margin: '0.75rem 0 1rem' }}>
         <div>
@@ -79,7 +81,7 @@ export default function ResellerProductAccessPage() {
         </div>
       </div>
       <p className="muted">
-        Controls which products this reseller can sell. Suspending or revoking access blocks new customers for that product;
+        Controls which products this partner can sell. Suspending or revoking access blocks new customers for that product;
         existing customer accounts and earned commissions are not changed.
       </p>
 
@@ -146,8 +148,7 @@ export default function ResellerProductAccessPage() {
       </div>
 
       {editing && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+        <Modal label={`${editing.row.product.name} access`} onClose={() => setEditing(null)}>
             <h2>{editing.row.product.name} access</h2>
             {dialogError && <div className="alert error">{dialogError}</div>}
             <div className="field">
@@ -160,11 +161,11 @@ export default function ResellerProductAccessPage() {
                 ))}
               </select>
               {editing.status === 'ACTIVE' && editing.row.product.status !== 'ACTIVE' && (
-                <span className="hint">The product itself is not active, so the reseller cannot sell it yet.</span>
+                <span className="hint">The product itself is not active, so the partner cannot sell it yet.</span>
               )}
             </div>
             <div className="field">
-              <label htmlFor="ac-note">Note to reseller (optional)</label>
+              <label htmlFor="ac-note">Note to partner (optional)</label>
               <textarea id="ac-note" rows={2} value={editing.note} onChange={(e) => setEditing((s) => s && { ...s, note: e.target.value })} />
             </div>
             <div className="row">
@@ -176,8 +177,7 @@ export default function ResellerProductAccessPage() {
                 Save
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

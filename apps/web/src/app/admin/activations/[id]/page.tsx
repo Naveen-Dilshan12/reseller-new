@@ -8,6 +8,7 @@ import { useAdminUser } from '@/lib/admin-context'
 import { formatDate, formatMoney, monthLabel } from '@/lib/format'
 import { ACTIVATION_STATUS_LABELS, type ActivationRunResult, type AdminActivation } from '@/lib/activation-types'
 import { ActivationHistory, ActivationSteps, BankSlipViewer, StatusBadge } from '@/components/activations/ActivationParts'
+import { Modal } from '@/components/ui/Modal'
 
 type Dialog = 'verify' | 'approve' | 'reject' | 'complete' | null
 type Message = { kind: 'success' | 'error' | 'info' | 'warning'; text: string }
@@ -29,6 +30,7 @@ export default function AdminActivationPage() {
   const [note, setNote] = useState('')
   const [confirmed, setConfirmed] = useState(false)
   const [reference, setReference] = useState('')
+  const [externalTenantId, setExternalTenantId] = useState('')
 
   const load = useCallback(() => {
     api<AdminActivation>(`/activation-requests/${id}`)
@@ -40,6 +42,7 @@ export default function AdminActivationPage() {
   const openDialog = (d: Dialog) => {
     setNote('')
     setReference('')
+    setExternalTenantId('')
     setConfirmed(false)
     setDialogError(null)
     setDialog(d)
@@ -100,17 +103,27 @@ export default function AdminActivationPage() {
       }, 'Approval failed', true)
     }
     if (dialog === 'reject') {
-      if (note.trim().length < 10) return setDialogError('Give the reseller a clear reason (at least 10 characters)')
+      if (note.trim().length < 10) return setDialogError('Give the partner a clear reason (at least 10 characters)')
       return run(async () => {
         setItem(await post<AdminActivation>('reject', { reason: note.trim() }))
-        setMessage({ kind: 'info', text: 'Request rejected. The reseller has been notified.' })
+        setMessage({ kind: 'info', text: 'Request rejected. The partner has been notified.' })
       }, 'Rejection failed', true)
     }
     if (dialog === 'complete') {
+      if (!item) return
+      if (!item.customerAccount.externalTenantId && externalTenantId.trim().length < 1) {
+        return setDialogError('Enter the SaaS tenant ID created in the SaaS console')
+      }
       if (reference.trim().length < 2) return setDialogError('Enter the SaaS invoice / subscription reference')
       return run(async () => {
-        setItem(await post<AdminActivation>('complete', { activationReference: reference.trim(), ...(note.trim() ? { note: note.trim() } : {}) }))
-        setMessage({ kind: 'success', text: 'Activation recorded. The customer account is active and the reseller commission was generated.' })
+        setItem(
+          await post<AdminActivation>('complete', {
+            activationReference: reference.trim(),
+            ...(!item.customerAccount.externalTenantId ? { externalTenantId: externalTenantId.trim() } : {}),
+            ...(note.trim() ? { note: note.trim() } : {}),
+          }),
+        )
+        setMessage({ kind: 'success', text: 'Activation recorded. The customer account is active and the partner commission was generated.' })
       }, 'Could not complete the activation', true)
     }
   }
@@ -342,7 +355,7 @@ export default function AdminActivationPage() {
             </dd>
             {item.notes && (
               <>
-                <dt>Reseller notes</dt>
+                <dt>Partner notes</dt>
                 <dd>{item.notes}</dd>
               </>
             )}
@@ -373,7 +386,7 @@ export default function AdminActivationPage() {
             <dd>
               {item.activation.provider ?? 'none'} <span className={`badge ${item.activation.integrationStatus}`}>{item.activation.integrationStatus}</span>
             </dd>
-            <dt>Reseller</dt>
+            <dt>Partner</dt>
             <dd>
               {item.reseller.businessName} <span className="muted mono small">{item.reseller.code}</span>
             </dd>
@@ -393,8 +406,7 @@ export default function AdminActivationPage() {
       </div>
 
       {dialog && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+        <Modal label={dialog === 'verify' ? 'Verify payment' : dialog === 'approve' ? 'Approve request' : dialog === 'reject' ? 'Reject request' : 'Mark activation completed'} onClose={() => setDialog(null)}>
             {dialog === 'verify' && (
               <>
                 <h2>Verify payment</h2>
@@ -425,7 +437,7 @@ export default function AdminActivationPage() {
             {dialog === 'reject' && (
               <>
                 <h2>Reject request</h2>
-                <p className="small">The reason is shown to the reseller.</p>
+                <p className="small">The reason is shown to the partner.</p>
                 <div className="field">
                   <label htmlFor="dlg-note">Rejection reason</label>
                   <textarea
@@ -444,8 +456,21 @@ export default function AdminActivationPage() {
                 <h2>Mark activation completed</h2>
                 <p className="small">
                   Only do this after the subscription is active in {item.product.name}. The customer account becomes active and the
-                  reseller&apos;s commission is generated.
+                  partner&apos;s commission is generated.
                 </p>
+                {!item.customerAccount.externalTenantId && (
+                  <div className="field">
+                    <label htmlFor="dlg-tenant">SaaS Tenant ID</label>
+                    <input
+                      id="dlg-tenant"
+                      maxLength={100}
+                      placeholder="e.g. TENANT-001 or business subdomain"
+                      value={externalTenantId}
+                      onChange={(e) => setExternalTenantId(e.target.value)}
+                    />
+                    <div className="hint small muted">This account does not have a tenant ID linked yet. Enter the tenant ID created in the SaaS.</div>
+                  </div>
+                )}
                 <div className="field">
                   <label htmlFor="dlg-ref">SaaS invoice / subscription reference</label>
                   <input id="dlg-ref" maxLength={100} value={reference} onChange={(e) => setReference(e.target.value)} />
@@ -474,8 +499,7 @@ export default function AdminActivationPage() {
                         : 'Mark completed'}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

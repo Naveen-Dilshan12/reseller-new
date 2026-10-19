@@ -5,14 +5,21 @@ import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { api, apiRequest, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
-import { formatMoney } from '@/lib/format'
+import { formatDate, formatMoney } from '@/lib/format'
 import {
   INTEGRATION_STATUS_LABELS,
+  LIFECYCLE_ACTIONS,
+  LIFECYCLE_LABELS,
+  PRODUCT_STATUS_DESCRIPTIONS,
   PRODUCT_STATUS_LABELS,
   trialLabel,
   type IntegrationProviderInfo,
+  type LifecycleAction,
   type ProductDetail,
+  type ResellerWithoutAccess,
 } from '@/lib/product-types'
+import { Modal } from '@/components/ui/Modal'
+import { ProductLifecycleDialog } from '@/components/admin/ProductLifecycleDialog'
 
 interface IntegrationLog {
   id: string
@@ -31,29 +38,63 @@ export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>()
   const admin = useAdminUser()
   const canConfigure = admin.permissions.includes('integrations:manage')
+  const canManageProducts = admin.permissions.includes('products:manage')
+  // The review lists reseller names, so it also needs resellers:read (as the endpoint does).
+  const canReviewAccess = canManageProducts && admin.permissions.includes('resellers:read')
 
   const [product, setProduct] = useState<ProductDetail | null>(null)
-  const [providers, setProviders] = useState<IntegrationProviderInfo[]>([])
-  const [logs, setLogs] = useState<IntegrationLog[]>([])
+  // `null` means "not loaded yet", so an empty list is only ever shown for a request that really succeeded.
+  const [providers, setProviders] = useState<IntegrationProviderInfo[] | null>(null)
+  const [providersError, setProvidersError] = useState<string | null>(null)
+  const [logs, setLogs] = useState<IntegrationLog[] | null>(null)
+  const [logsError, setLogsError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [message, setMessage] = useState<string | null>(null)
+  const [message, setMessage] = useState<{ tone: 'info' | 'success' | 'error'; text: string } | null>(null)
 
   const [editing, setEditing] = useState(false)
-  const [details, setDetails] = useState({ name: '', description: '', monthlyPrice: '', status: 'ACTIVE', trialAvailable: false, trialDays: '' })
+  // `baseUpdatedAt` is the product version the form was opened on; it is sent with the save so that an edit based on
+  // an older copy is refused (409) instead of overwriting what someone else saved. It must not move while editing.
+  // Status is not part of the form: it changes only through Retire / Restore (the server refuses it in a general edit).
+  const [details, setDetails] = useState({ name: '', description: '', monthlyPrice: '', trialAvailable: false, trialDays: '', baseUpdatedAt: '' })
   const [detailsError, setDetailsError] = useState<string | null>(null)
+  const [conflict, setConflict] = useState(false)
 
   const [configOpen, setConfigOpen] = useState(false)
   const [config, setConfig] = useState({ provider: 'MANUAL', enabled: true, baseUrl: '', apiKey: '', signingSecret: '', clearCredentials: false })
   const [configError, setConfigError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const loadLogs = useCallback(() => {
-    apiRequest<IntegrationLog[]>(`/admin/saas-products/${id}/integration/logs?limit=20`)
-      .then((r) => setLogs(r.data))
-      .catch(() => setLogs([]))
+  const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
+  const [missingAccess, setMissingAccess] = useState<{ total: number; limit: number; items: ResellerWithoutAccess[] } | null>(null)
+  const [missingAccessError, setMissingAccessError] = useState<string | null>(null)
+  const [missingAccessLoading, setMissingAccessLoading] = useState(false)
+
+  /** Read-only: lists approved resellers without access so an admin can grant it explicitly, reseller by reseller. */
+  const loadMissingAccess = useCallback(() => {
+    setMissingAccessError(null)
+    setMissingAccessLoading(true)
+    api<{ total: number; limit: number; items: ResellerWithoutAccess[] }>(`/admin/saas-products/${id}/resellers-without-access`)
+      .then(setMissingAccess)
+      .catch((err) => setMissingAccessError(errorText(err, 'Failed to load partners without access')))
+      .finally(() => setMissingAccessLoading(false))
   }, [id])
 
+  const loadLogs = useCallback(() => {
+    setLogsError(null)
+    apiRequest<IntegrationLog[]>(`/admin/saas-products/${id}/integration/logs?limit=20`)
+      .then((r) => setLogs(r.data))
+      .catch((err) => setLogsError(errorText(err, 'Failed to load integration calls')))
+  }, [id])
+
+  const loadProviders = useCallback(() => {
+    setProvidersError(null)
+    api<IntegrationProviderInfo[]>('/admin/saas-products/providers')
+      .then(setProviders)
+      .catch((err) => setProvidersError(errorText(err, 'Failed to load the available integration implementations')))
+  }, [])
+
   const load = useCallback(() => {
+    setError(null)
     api<ProductDetail>(`/admin/saas-products/${id}`)
       .then(setProduct)
       .catch((err) => setError(errorText(err, 'Failed to load product')))
@@ -62,26 +103,57 @@ export default function ProductDetailPage() {
 
   useEffect(() => {
     load()
-    api<IntegrationProviderInfo[]>('/admin/saas-products/providers').then(setProviders).catch(() => setProviders([]))
-  }, [load])
+    loadProviders()
+  }, [load, loadProviders])
 
-  if (error) return <main className="container"><div className="alert error">{error}</div></main>
+  // First load failed: nothing to show yet, so offer a way back and a retry.
+  if (error && !product) {
+    return (
+      <main className="container">
+        <Link href="/admin/products" className="small">
+          ← All products
+        </Link>
+        <div className="alert error" style={{ marginTop: '0.75rem' }}>
+          {error}
+        </div>
+        <button className="btn secondary" onClick={load}>
+          Retry
+        </button>
+      </main>
+    )
+  }
   if (!product) return <main className="container muted">Loading…</main>
 
   const integration = product.integration
-  const selectedProvider = providers.find((p) => p.key === config.provider)
+  const selectedProvider = providers?.find((p) => p.key === config.provider)
 
-  const startEdit = () => {
+  const openEditor = (p: ProductDetail) => {
     setDetails({
-      name: product.name,
-      description: product.description ?? '',
-      monthlyPrice: product.monthlyPrice,
-      status: product.status,
-      trialAvailable: product.trialAvailable,
-      trialDays: product.trialDays ? String(product.trialDays) : '',
+      name: p.name,
+      description: p.description ?? '',
+      monthlyPrice: p.monthlyPrice,
+      trialAvailable: p.trialAvailable,
+      trialDays: p.trialDays ? String(p.trialDays) : '',
+      baseUpdatedAt: p.updatedAt,
     })
     setDetailsError(null)
+    setConflict(false)
     setEditing(true)
+  }
+  const startEdit = () => openEditor(product)
+
+  /** After a conflict: fetch the product as it is now and start a fresh edit from it. Nothing is saved or merged. */
+  const reloadLatest = async () => {
+    setBusy(true)
+    try {
+      const fresh = await api<ProductDetail>(`/admin/saas-products/${id}`)
+      setProduct(fresh)
+      openEditor(fresh)
+    } catch (err) {
+      setDetailsError(errorText(err, 'Failed to reload the product'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const saveDetails = async () => {
@@ -94,16 +166,17 @@ export default function ProductDetailPage() {
           name: details.name.trim(),
           description: details.description.trim() || null,
           monthlyPrice: Number(details.monthlyPrice),
-          status: details.status,
           trialAvailable: details.trialAvailable,
           trialDays: details.trialAvailable && details.trialDays ? Number(details.trialDays) : null,
+          expectedUpdatedAt: details.baseUpdatedAt,
         }),
       })
       setProduct(updated)
       setEditing(false)
-      setMessage('Product updated.')
+      setMessage({ tone: 'info', text: 'Product updated.' })
     } catch (err) {
-      setDetailsError(errorText(err, 'Failed to save'))
+      if (err instanceof ApiError && err.status === 409) setConflict(true)
+      else setDetailsError(errorText(err, 'Failed to save'))
     } finally {
       setBusy(false)
     }
@@ -136,7 +209,7 @@ export default function ProductDetailPage() {
       const updated = await api<ProductDetail>(`/admin/saas-products/${id}/integration`, { method: 'PUT', body: JSON.stringify(body) })
       setProduct(updated)
       setConfigOpen(false)
-      setMessage('Integration settings saved. Run “Test connection” to verify.')
+      setMessage({ tone: 'info', text: 'Integration settings saved. Run “Test connection” to verify.' })
     } catch (err) {
       setConfigError(errorText(err, 'Failed to save integration'))
     } finally {
@@ -151,10 +224,14 @@ export default function ProductDetailPage() {
     setMessage(null)
     try {
       const result = await api<{ ok: boolean; message: string | null }>(`/admin/saas-products/${id}/integration/test`, { method: 'POST' })
-      setMessage(result.ok ? `Connection OK${result.message ? ` – ${result.message}` : ''}.` : `Connection failed: ${result.message ?? 'unknown error'}`)
+      setMessage(
+        result.ok
+          ? { tone: 'success', text: `Connection OK${result.message ? ` – ${result.message}` : ''}.` }
+          : { tone: 'error', text: `Connection failed: ${result.message ?? 'unknown error'}` },
+      )
       load()
     } catch (err) {
-      setMessage(errorText(err, 'Connection test failed'))
+      setMessage({ tone: 'error', text: errorText(err, 'Connection test failed') })
     } finally {
       setBusy(false)
     }
@@ -177,9 +254,27 @@ export default function ProductDetailPage() {
             Edit details
           </button>
         )}
+        {!editing &&
+          canManageProducts &&
+          LIFECYCLE_ACTIONS[product.status].map((a) => (
+            <button key={a} className="btn secondary" onClick={() => setLifecycle(a)}>
+              {LIFECYCLE_LABELS[a]}
+            </button>
+          ))}
       </div>
+      <p className="small muted" style={{ margin: '-0.5rem 0 1rem' }}>
+        {PRODUCT_STATUS_DESCRIPTIONS[product.status]}
+      </p>
 
-      {message && <div className="alert info">{message}</div>}
+      {error && (
+        <div className="alert error">
+          {error}{' '}
+          <button className="btn secondary small" onClick={load}>
+            Retry
+          </button>
+        </div>
+      )}
+      {message && <div className={`alert ${message.tone}`}>{message.text}</div>}
 
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Product details</h2>
@@ -198,7 +293,7 @@ export default function ProductDetailPage() {
               {product.description || '—'}
             </div>
             <div>
-              <div className="muted small">Resellers with access</div>
+              <div className="muted small">Partners with access</div>
               {product._count.resellerAccess}
             </div>
             <div>
@@ -208,6 +303,17 @@ export default function ProductDetailPage() {
           </div>
         ) : (
           <>
+            {conflict && (
+              <div className="alert error">
+                <strong>This product was changed by someone else.</strong> Your changes were not saved. Reload the latest version to
+                see what changed, then make your edit again.
+                <div style={{ marginTop: '0.5rem' }}>
+                  <button className="btn secondary small" onClick={reloadLatest} disabled={busy}>
+                    Reload latest version
+                  </button>
+                </div>
+              </div>
+            )}
             {detailsError && <div className="alert error">{detailsError}</div>}
             <div className="grid-2">
               <div className="field">
@@ -215,15 +321,13 @@ export default function ProductDetailPage() {
                 <input id="pd-name" value={details.name} onChange={(e) => setDetails((d) => ({ ...d, name: e.target.value }))} />
               </div>
               <div className="field">
-                <label htmlFor="pd-status">Status</label>
-                <select id="pd-status" value={details.status} onChange={(e) => setDetails((d) => ({ ...d, status: e.target.value }))}>
-                  {Object.entries(PRODUCT_STATUS_LABELS).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-                <span className="hint">Only Active products can be sold. Existing customer accounts are not affected.</span>
+                <div className="muted small">Status</div>
+                <span className={`badge ${product.status}`}>{PRODUCT_STATUS_LABELS[product.status]}</span>
+                <span className="hint">
+                  Status is not changed here. Save or cancel this edit, then use the status buttons at the top of the page:
+                  “Retire product” and “Set coming soon” need a reason, and “Launch product” and “Restore product” put a product
+                  on sale. Each shows what it affects before you confirm, and is recorded.
+                </span>
               </div>
               <div className="field span-2">
                 <label htmlFor="pd-desc">Description</label>
@@ -252,10 +356,82 @@ export default function ProductDetailPage() {
               <button className="btn secondary" onClick={() => setEditing(false)} disabled={busy}>
                 Cancel
               </button>
-              <button className="btn" onClick={saveDetails} disabled={busy}>
+              <button className="btn" onClick={saveDetails} disabled={busy || conflict}>
                 Save
               </button>
             </div>
+          </>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Partner access</h2>
+        <p className="small muted">
+          {product._count.resellerAccess} {product._count.resellerAccess === 1 ? 'partner has' : 'partners have'} active access.
+          Access is never granted automatically: partners approved while this product was inactive, or before it was added,
+          have no access until it is granted for each partner from their product access page.
+        </p>
+        {canReviewAccess && (
+          <>
+            {missingAccessError ? (
+              <div className="alert error">
+                {missingAccessError}{' '}
+                <button className="btn secondary small" onClick={loadMissingAccess}>
+                  Retry loading partners
+                </button>
+              </div>
+            ) : missingAccessLoading ? (
+              <p className="muted">Loading…</p>
+            ) : !missingAccess ? (
+              <button className="btn secondary" onClick={loadMissingAccess}>
+                Review approved partners without access
+              </button>
+            ) : missingAccess.total === 0 ? (
+              <p className="muted">Every approved partner has an access record for this product.</p>
+            ) : (
+              <>
+                <p className="small">
+                  {missingAccess.total} approved {missingAccess.total === 1 ? 'partner has' : 'partners have'} no access record for this
+                  product. Nothing is granted from here: open a partner’s product access to grant it. Partners whose access was
+                  suspended or revoked are not listed.
+                </p>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Partner</th>
+                        <th>Approved</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {missingAccess.items.map((r) => (
+                        <tr key={r.id}>
+                          <td>
+                            {r.businessName}
+                            <div className="muted small mono">{r.code}</div>
+                          </td>
+                          <td className="small">{formatDate(r.approvedAt)}</td>
+                          <td>
+                            <Link href={`/admin/resellers/${r.id}/products`} className="small">
+                              Open product access
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {missingAccess.total > missingAccess.items.length && (
+                  <p className="small muted">
+                    Showing the first {missingAccess.items.length} of {missingAccess.total}.
+                  </p>
+                )}
+                <button className="btn secondary small" onClick={loadMissingAccess}>
+                  Refresh list
+                </button>
+              </>
+            )}
           </>
         )}
       </div>
@@ -270,14 +446,22 @@ export default function ProductDetailPage() {
               <button className="btn secondary" onClick={testConnection} disabled={busy || !integration}>
                 Test connection
               </button>
-              <button className="btn" onClick={openConfig} disabled={busy}>
+              <button className="btn" onClick={openConfig} disabled={busy || !providers}>
                 Configure
               </button>
             </>
           )}
         </div>
+        {canConfigure && providersError && (
+          <div className="alert error">
+            {providersError}{' '}
+            <button className="btn secondary small" onClick={loadProviders}>
+              Retry loading implementations
+            </button>
+          </div>
+        )}
         <p className="small muted">
-          Connection settings are stored encrypted on the server and are never sent to resellers. Secrets cannot be viewed
+          Connection settings are stored encrypted on the server and are never sent to partners. Secrets cannot be viewed
           again after saving – only replaced.
         </p>
         {!integration ? (
@@ -317,7 +501,16 @@ export default function ProductDetailPage() {
 
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Recent integration calls</h2>
-        {logs.length === 0 ? (
+        {logsError ? (
+          <div className="alert error">
+            {logsError}{' '}
+            <button className="btn secondary small" onClick={loadLogs}>
+              Retry loading calls
+            </button>
+          </div>
+        ) : logs === null ? (
+          <p className="muted">Loading…</p>
+        ) : logs.length === 0 ? (
           <p className="muted">No calls yet.</p>
         ) : (
           <div className="table-wrap">
@@ -351,14 +544,13 @@ export default function ProductDetailPage() {
       </div>
 
       {configOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal wide">
+        <Modal label={'Configure integration'} onClose={() => setConfigOpen(false)} wide>
             <h2>Configure integration</h2>
             {configError && <div className="alert error">{configError}</div>}
             <div className="field">
               <label htmlFor="ic-provider">Implementation</label>
               <select id="ic-provider" value={config.provider} onChange={(e) => setConfig((c) => ({ ...c, provider: e.target.value }))}>
-                {providers.map((p) => (
+                {(providers ?? []).map((p) => (
                   <option key={p.key} value={p.key}>
                     {p.label}
                   </option>
@@ -423,8 +615,24 @@ export default function ProductDetailPage() {
                 Save
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
+      )}
+
+      {lifecycle && (
+        <ProductLifecycleDialog
+          product={{ id: product.id, name: product.name, status: product.status, updatedAt: product.updatedAt }}
+          action={lifecycle}
+          onClose={() => setLifecycle(null)}
+          onDone={(updated, text) => {
+            setLifecycle(null)
+            setProduct(updated)
+            setMessage({ tone: 'info', text })
+          }}
+          onReload={() => {
+            setLifecycle(null)
+            load()
+          }}
+        />
       )}
     </main>
   )

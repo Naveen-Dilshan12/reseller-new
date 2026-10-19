@@ -1,17 +1,31 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { isPlatformUser, logout, useCurrentUser, type CurrentUser } from '@/lib/auth'
+import { ThemeToggle } from '@/components/ThemeToggle'
+import { PlatformLogo } from '@/components/PlatformLogo'
+import { LanguageToggle } from '@/components/LanguageToggle'
+import { NotificationBell } from '@/components/notifications/NotificationBell'
+import { api } from '@/lib/api'
+import { useAppearance, useProtectedImage } from '@/lib/appearance'
+import { heroBackgroundVars } from '@/lib/appearance-utils'
+import type { CommissionSummary } from '@/lib/commission-types'
+import { useLanguage } from '@/lib/i18n'
+import { LevelBadge } from '@/components/commissions/LevelBadge'
+import { LevelUpCelebration } from '@/components/commissions/LevelUpCelebration'
+import { PartnerSummaryProvider } from '@/components/commissions/PartnerSummaryContext'
+import { ApplicationPopups, ApplicationStatusCard } from '@/components/onboarding/ApplicationNotices'
 
-interface NavGroup {
-  title: string
-  items: NavItem[]
+interface NavGroupDef {
+  titleKey: string
+  items: NavItemDef[]
 }
 
-interface NavItem {
+interface NavItemDef {
   href: string
-  label: string
+  labelKey: string
   permission?: string
   match?: string[]
   icon: React.ReactNode
@@ -42,15 +56,24 @@ const ICONS = {
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   ),
-  trials: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-    </svg>
-  ),
   activations: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
       <path d="m9 12 2 2 4-4" />
+    </svg>
+  ),
+  demos: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18" />
+      <path d="m9 15 2 2 4-4" />
+    </svg>
+  ),
+  bank: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m3 9 9-6 9 6" />
+      <path d="M5 9v10M9.5 9v10M14.5 9v10M19 9v10" />
+      <path d="M3 21h18" />
     </svg>
   ),
   commissions: (
@@ -67,37 +90,106 @@ const ICONS = {
   ),
 }
 
-const GROUPS: NavGroup[] = [
+const GROUPS: NavGroupDef[] = [
   {
-    title: 'Overview',
+    titleKey: 'nav.overview',
     items: [
-      { href: '/dashboard', label: 'Dashboard', icon: ICONS.dashboard },
-      { href: '/products', label: 'SaaS Products', permission: 'products:read', icon: ICONS.products },
+      { href: '/dashboard', labelKey: 'nav.dashboard', icon: ICONS.dashboard },
+      { href: '/products', labelKey: 'nav.products', permission: 'products:read', icon: ICONS.products },
     ],
   },
   {
-    title: 'Customer Operations',
+    titleKey: 'nav.customerOperations',
     items: [
-      { href: '/customers', label: 'My Customers', permission: 'accounts:read', icon: ICONS.customers },
-      { href: '/trials', label: 'Free Trials', permission: 'trials:read', match: ['/trials/new'], icon: ICONS.trials },
-      { href: '/activations', label: 'Paid Activations', permission: 'activations:read', match: ['/activations/new'], icon: ICONS.activations },
+      { href: '/customers', labelKey: 'nav.customers', permission: 'accounts:read', icon: ICONS.customers },
+      { href: '/activations', labelKey: 'nav.activations', permission: 'activations:read', match: ['/activations/new'], icon: ICONS.activations },
+      // Same permission as the payment-info endpoint it reads.
+      { href: '/bank-details', labelKey: 'nav.bankDetails', permission: 'activations:read', icon: ICONS.bank },
+      { href: '/demo-requests', labelKey: 'nav.demos', permission: 'demos:read', match: ['/demo-requests/new'], icon: ICONS.demos },
     ],
   },
   {
-    title: 'Earnings & Growth',
+    titleKey: 'nav.earningsGrowth',
     items: [
-      { href: '/commissions', label: 'Commissions & Payouts', permission: 'commissions:read', icon: ICONS.commissions },
+      { href: '/commissions', labelKey: 'nav.commissions', permission: 'commissions:read', icon: ICONS.commissions },
     ],
   },
   {
-    title: 'Settings',
+    titleKey: 'nav.settings',
     items: [
-      { href: '/profile', label: 'Reseller Profile', icon: ICONS.profile },
+      { href: '/profile', labelKey: 'nav.profile', icon: ICONS.profile },
     ],
   },
 ]
 
-function isActive(pathname: string, item: NavItem) {
+/**
+ * The seller's actual partner level and commission rate (never a placeholder). Hidden until the
+ * data loads, for resellers that aren't ACTIVE yet, for users without commission access, and if
+ * the request fails.
+ */
+/** The signed-in seller's own commission summary (null until loaded, for ineligible users, or on failure). */
+function usePartnerSummary(user: CurrentUser | null) {
+  const [summary, setSummary] = useState<CommissionSummary | null>(null)
+  const eligible = Boolean(user && user.permissions.includes('commissions:read') && user.reseller?.status === 'ACTIVE')
+
+  useEffect(() => {
+    if (!eligible) return
+    let active = true
+    api<CommissionSummary>('/commissions/summary')
+      .then((s) => active && setSummary(s))
+      .catch(() => active && setSummary(null))
+    return () => {
+      active = false
+    }
+  }, [eligible])
+
+  return eligible ? summary : null
+}
+
+function PartnerTierCard({ summary }: { summary: CommissionSummary | null }) {
+  const { t } = useLanguage()
+  const level = summary?.level
+
+  if (!level) return null
+
+  const hasLevel = level.level !== null
+  const name = level.name ?? (hasLevel ? `Level ${level.level}` : t('header.partnerTierNone'))
+  const rate = Number(hasLevel ? level.ratePercent : level.effectiveRatePercent)
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div
+        style={{
+          padding: '0.85rem 1rem',
+          borderRadius: '12px',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          boxShadow: 'var(--shadow-sm)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+          <span style={{ fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--primary-light)', letterSpacing: '0.06em' }}>
+            {t('header.partnerTier')}
+          </span>
+          <span className="badge ACTIVE" style={{ fontSize: '0.62rem', padding: '0.12rem 0.45rem', borderRadius: '9999px' }}>
+            {t('header.partnerTierStatus')}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+          <LevelBadge level={level.level} name={level.name} size="md" />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 800, fontSize: '0.96rem', color: 'var(--text-heading)', marginBottom: '0.12rem' }}>{name}</div>
+            <div style={{ fontSize: '0.74rem', color: 'var(--muted)' }}>
+              {hasLevel ? t('header.partnerTierRate', { rate }) : t('header.partnerTierFirst', { rate })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function isActive(pathname: string, item: NavItemDef) {
   if (item.href === '/dashboard') return pathname === '/dashboard'
   return [item.href, ...(item.match ?? [])].some((p) => pathname === p || pathname.startsWith(`${p}/`))
 }
@@ -106,8 +198,171 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
   const user = useCurrentUser((u) => !isPlatformUser(u))
   const pathname = usePathname()
   const router = useRouter()
+  const { t } = useLanguage()
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const partnerSummary = usePartnerSummary(user)
+  // Loads the admin-managed appearance and applies its default color mode (unless this user chose their own).
+  const appearance = useAppearance()
+  // The Admin's hero image is set once here, as --dash-hero-image, so every hero below (the dashboard's and the shared
+  // PageHero on all other reseller pages) inherits the same value and changes or resets together. Unset or failed: the
+  // stylesheet's built-in picture.
+  const customHero = appearance?.heroImage ?? null
+  const heroImage = useProtectedImage(customHero ? '/appearance/hero-image' : null, customHero?.version)
+  const heroVars = heroBackgroundVars(heroImage, customHero !== null)
 
-  if (!user) return null
+  // Until the reseller application is approved only the dashboard (application status), the application
+  // form, the profile and notifications are available. The backend enforces the same rule on its APIs.
+  const approved = user?.reseller?.status === 'ACTIVE'
+  const allowedWhileUnapproved = ['/dashboard', '/profile', '/notifications'].some((p) => pathname.startsWith(p))
+  const blocked = Boolean(user) && !approved && !allowedWhileUnapproved
+  useEffect(() => {
+    if (blocked) router.replace('/dashboard')
+  }, [blocked, router])
+
+  // Automatically close mobile menu when navigating to another route
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [pathname])
+
+  // Safe loading skeleton to prevent blank screen flicker on initial load before session verification
+  if (!user) {
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', transition: 'background-color 0.2s ease, color 0.2s ease' }}>
+        <header
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 40,
+            background: 'var(--header-bg)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+            borderBottom: '1px solid var(--border)',
+            height: '56px',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 1.25rem',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', width: '220px' }}>
+            <PlatformLogo
+              size={32}
+              fallback={
+                <div
+                  style={{
+                    width: '32px',
+                    height: '32px',
+                    borderRadius: '8px',
+                    background: 'var(--primary)',
+                    color: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: 800,
+                    fontSize: '0.92rem',
+                  }}
+                >
+                  H
+                </div>
+              }
+            />
+            <div>
+              <div style={{ fontWeight: 800, fontSize: '0.94rem', color: 'var(--text-heading)', letterSpacing: '-0.02em', lineHeight: 1.2 }}>
+                {t('brand.title')}
+              </div>
+              <div style={{ fontSize: '0.7rem', color: 'var(--muted)', fontWeight: 500, lineHeight: 1.2 }}>
+                {t('brand.subtitle')}
+              </div>
+            </div>
+          </div>
+          <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <LanguageToggle />
+            <ThemeToggle />
+            <div
+              style={{
+                width: '100px',
+                height: '30px',
+                borderRadius: '8px',
+                background: 'var(--badge-bg-subtle)',
+                border: '1px solid var(--border)',
+                opacity: 0.6,
+              }}
+            />
+          </div>
+        </header>
+
+        <div style={{ display: 'flex', minHeight: 'calc(100vh - 56px)' }}>
+          <aside
+            className="reseller-sidebar"
+            style={{
+              background: 'var(--sidebar-bg)',
+              borderRight: '1px solid var(--border)',
+              padding: '1.5rem 0.85rem',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+              gap: '1.6rem',
+              zIndex: 30,
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {GROUPS.map((group) => (
+                <div key={group.titleKey}>
+                  <div
+                    style={{
+                      fontSize: '0.68rem',
+                      fontWeight: 800,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.06em',
+                      color: 'var(--muted)',
+                      padding: '0 0.75rem 0.5rem',
+                    }}
+                  >
+                    {t(group.titleKey)}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                    {group.items.map((item) => {
+                      const active = isActive(pathname, item)
+                      return (
+                        <div
+                          key={item.href}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.75rem',
+                            padding: '0.58rem 0.75rem',
+                            borderRadius: '9px',
+                            fontSize: '0.88rem',
+                            fontWeight: active ? 700 : 500,
+                            color: active ? 'var(--primary)' : 'var(--text-secondary)',
+                            background: active ? 'rgba(37, 99, 235, 0.08)' : 'transparent',
+                            border: active ? '1px solid rgba(37, 99, 235, 0.22)' : '1px solid transparent',
+                          }}
+                        >
+                          <span style={{ color: active ? 'var(--primary)' : 'var(--muted)', display: 'flex' }}>
+                            {item.icon}
+                          </span>
+                          {t(item.labelKey)}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
+
+          <main className="reseller-content" style={{ flex: 1, minWidth: 0, padding: '1.75rem 2.25rem', background: 'var(--bg)' }}>
+            <div style={{ maxWidth: 1240, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              <div style={{ width: '220px', height: '32px', borderRadius: '8px', background: 'var(--surface)', border: '1px solid var(--border)' }} />
+              <div style={{ width: '360px', height: '16px', borderRadius: '4px', background: 'var(--surface)', border: '1px solid var(--border)' }} />
+              <div style={{ height: '220px', borderRadius: 'var(--radius)', background: 'var(--surface)', border: '1px solid var(--border)', marginTop: '1rem' }} />
+            </div>
+          </main>
+        </div>
+      </div>
+    )
+  }
 
   const initials = user.name
     ? user.name
@@ -119,122 +374,140 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
     : 'RS'
 
   const businessName = user.reseller?.businessName || 'Hexalyte Partner'
-  const resellerCode = user.reseller?.code || 'RES-PARTNER'
 
   return (
-    <div style={{ minHeight: '100vh', background: '#080b11', color: '#f8fafc' }}>
-      {/* Top Header - Glassmorphic Cyber Dark */}
+    <div style={{ ...heroVars, minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', transition: 'background-color 0.2s ease, color 0.2s ease' } as React.CSSProperties}>
+      {/* Top Header */}
       <header
+        className="reseller-header"
         style={{
           position: 'sticky',
           top: 0,
           zIndex: 40,
-          background: 'rgba(8, 12, 20, 0.85)',
+          background: 'var(--header-bg)',
           backdropFilter: 'blur(16px)',
           WebkitBackdropFilter: 'blur(16px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          height: '64px',
+          borderBottom: '1px solid var(--border)',
+          height: '56px',
           display: 'flex',
           alignItems: 'center',
-          padding: '0 1.5rem',
+          padding: '0 1.25rem',
         }}
       >
+        {/* Mobile menu toggle button (hidden on desktop via CSS) */}
+        <button
+          className="reseller-mobile-menu-btn"
+          onClick={() => setMobileMenuOpen((prev) => !prev)}
+          aria-label={mobileMenuOpen ? 'Close navigation' : 'Open navigation'}
+          style={{
+            display: 'none',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '32px',
+            height: '32px',
+            borderRadius: '8px',
+            background: 'var(--badge-bg-subtle)',
+            border: '1px solid var(--border)',
+            color: 'var(--text)',
+            cursor: 'pointer',
+            marginRight: '0.55rem',
+            padding: 0,
+            flexShrink: 0,
+          }}
+        >
+          {mobileMenuOpen ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          )}
+        </button>
+
         {/* Brand Area */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', width: '250px' }}>
-          <div
-            style={{
-              width: '34px',
-              height: '34px',
-              borderRadius: '9px',
-              background: 'linear-gradient(135deg, #6366f1 0%, #3b82f6 100%)',
-              color: '#fff',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 800,
-              fontSize: '1rem',
-              boxShadow: '0 0 18px rgba(99, 102, 241, 0.45)',
-            }}
-          >
-            H
-          </div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: '0.98rem', color: '#ffffff', letterSpacing: '-0.02em' }}>
-              Hexalyte Partner
+        <div className="reseller-header-brand" style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', width: '220px' }}>
+          <PlatformLogo
+            size={32}
+            className="reseller-header-logo"
+            fallback={
+              <div
+                className="reseller-header-logo"
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: 'var(--primary)',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 800,
+                  fontSize: '0.92rem',
+                }}
+              >
+                H
+              </div>
+            }
+          />
+          <div className="reseller-header-brand-text">
+            <div style={{ fontWeight: 800, fontSize: '0.94rem', color: 'var(--text-heading)', letterSpacing: '-0.02em', lineHeight: 1.2 }}>
+              {t('brand.title')}
             </div>
-            <div style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 500 }}>
-              Reseller Console
+            <div style={{ fontSize: '0.7rem', color: 'var(--muted)', fontWeight: 500, lineHeight: 1.2 }}>
+              {t('brand.subtitle')}
             </div>
           </div>
         </div>
 
-        {/* Live Status & Reseller ID Tag */}
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <div
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.45rem',
-              background: 'rgba(255, 255, 255, 0.04)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              padding: '0.35rem 0.75rem',
-              borderRadius: '20px',
-              fontSize: '0.75rem',
-              color: '#94a3b8',
-              fontWeight: 600,
-            }}
-          >
-            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 8px #10b981' }} />
-            <span style={{ color: '#cbd5e1' }}>{businessName}</span>
-            <span style={{ color: '#64748b' }}>·</span>
-            <span className="mono" style={{ color: '#a5b4fc', fontSize: '0.72rem' }}>{resellerCode}</span>
-          </div>
-        </div>
+        <div style={{ flex: 1 }} />
 
-        {/* Quick Actions & Profile Bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
-          {user.permissions.includes('trials:create') && (
-            <Link href="/trials/new" className="btn secondary small" style={{ display: 'inline-flex', gap: '0.35rem' }}>
-              <span style={{ color: '#818cf8', fontWeight: 800 }}>+</span> New Trial
-            </Link>
-          )}
+        {/* Controls: Language, Theme, Quick Actions, User Profile & Sign Out */}
+        <div className="reseller-header-controls" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {/* Language Switcher (සිංහල / EN) */}
+          <LanguageToggle />
 
-          {user.permissions.includes('activations:create') && (
-            <Link href="/activations/new" className="btn small" style={{ display: 'inline-flex', gap: '0.35rem' }}>
-              <span style={{ fontWeight: 800 }}>+</span> Activate
-            </Link>
-          )}
+          {/* Theme Toggle (Light / Dark / System) */}
+          <ThemeToggle className="reseller-header-theme" />
+
+          {/* Notifications: unread count from GET /notifications/unread-count */}
+          <NotificationBell href="/notifications" label={t('nav.notifications')} />
 
           <div
+            className="reseller-header-user-badge"
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: '0.65rem',
-              padding: '0.35rem 0.65rem',
-              borderRadius: '9px',
-              background: 'rgba(255, 255, 255, 0.04)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              gap: '0.55rem',
+              padding: '0.22rem 0.55rem',
+              borderRadius: '8px',
+              background: 'var(--badge-bg-subtle)',
+              border: '1px solid var(--border)',
             }}
           >
             <div
               style={{
-                width: '30px',
-                height: '30px',
-                borderRadius: '8px',
-                background: 'linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)',
+                width: '28px',
+                height: '28px',
+                borderRadius: '7px',
+                background: 'var(--primary)',
                 color: '#fff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontWeight: 800,
-                fontSize: '0.76rem',
+                fontSize: '0.74rem',
               }}
             >
               {initials}
             </div>
             <div>
-              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc' }}>{user.name}</div>
-              <div style={{ fontSize: '0.68rem', color: '#60a5fa', fontWeight: 700 }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-heading)', lineHeight: 1.2 }}>{user.name}</div>
+              <div style={{ fontSize: '0.66rem', color: 'var(--primary-light)', fontWeight: 700, lineHeight: 1.2 }}>
                 {user.role.replace('_', ' ')}
               </div>
             </div>
@@ -242,29 +515,42 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
 
           <button
             className="btn secondary small"
+            style={{ padding: '0.32rem 0.65rem', fontSize: '0.8rem', borderRadius: '8px' }}
             onClick={async () => {
               await logout()
               router.replace('/login')
             }}
           >
-            Sign out
+            {t('header.signOut')}
           </button>
         </div>
       </header>
 
+      {/* Mobile Backdrop Overlay */}
+      {mobileMenuOpen && (
+        <div
+          className="reseller-mobile-backdrop"
+          onClick={() => setMobileMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Main Grid: Sidebar + Dynamic Content */}
-      <div style={{ display: 'flex', minHeight: 'calc(100vh - 64px)' }}>
-        {/* Next-Level Dark Sidebar */}
+      <div className="reseller-layout-body" style={{ display: 'flex', minHeight: 'calc(100vh - 56px)' }}>
+        {/* Stationary Sticky Sidebar */}
         <aside
+          className={`reseller-sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}
           style={{
-            width: '260px',
-            background: '#090d16',
-            borderRight: '1px solid rgba(255, 255, 255, 0.08)',
+            // position / size come from .reseller-sidebar (fixed under the header)
+            background: 'var(--sidebar-bg)',
+            borderRight: '1px solid var(--border)',
             padding: '1.5rem 0.85rem',
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'space-between',
             gap: '1.6rem',
+            transition: 'background 0.2s ease, border-color 0.2s ease, transform 0.25s ease',
+            zIndex: 30,
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -273,18 +559,18 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
               if (accessible.length === 0) return null
 
               return (
-                <div key={group.title}>
+                <div key={group.titleKey}>
                   <div
                     style={{
                       fontSize: '0.68rem',
                       fontWeight: 800,
                       textTransform: 'uppercase',
                       letterSpacing: '0.06em',
-                      color: '#64748b',
+                      color: 'var(--muted)',
                       padding: '0 0.75rem 0.5rem',
                     }}
                   >
-                    {group.title}
+                    {t(group.titleKey)}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                     {accessible.map((item) => {
@@ -293,6 +579,7 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
                         <Link
                           key={item.href}
                           href={item.href}
+                          onClick={() => setMobileMenuOpen(false)}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -301,19 +588,17 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
                             borderRadius: '9px',
                             fontSize: '0.88rem',
                             fontWeight: active ? 700 : 500,
-                            color: active ? '#a5b4fc' : '#94a3b8',
-                            background: active
-                              ? 'linear-gradient(135deg, rgba(79, 70, 229, 0.25) 0%, rgba(139, 92, 246, 0.15) 100%)'
-                              : 'transparent',
-                            border: active ? '1px solid rgba(99, 102, 241, 0.35)' : '1px solid transparent',
-                            boxShadow: active ? '0 0 15px rgba(99, 102, 241, 0.12)' : 'none',
+                            color: active ? 'var(--primary)' : 'var(--text-secondary)',
+                            background: active ? 'rgba(37, 99, 235, 0.08)' : 'transparent',
+                            border: active ? '1px solid rgba(37, 99, 235, 0.22)' : '1px solid transparent',
+                            boxShadow: 'none',
                             transition: 'all 0.15s ease',
                           }}
                         >
-                          <span style={{ color: active ? '#818cf8' : '#64748b', display: 'flex' }}>
+                          <span style={{ color: active ? 'var(--primary)' : 'var(--muted)', display: 'flex' }}>
                             {item.icon}
                           </span>
-                          {item.label}
+                          {t(item.labelKey)}
                         </Link>
                       )
                     })}
@@ -323,38 +608,31 @@ export function ResellerShell({ children }: { children: (user: CurrentUser) => R
             })}
           </div>
 
-          {/* Bottom Partner Status Card */}
-          <div
-            style={{
-              padding: '1rem',
-              borderRadius: '12px',
-              background: 'linear-gradient(145deg, rgba(15, 23, 42, 0.8) 0%, rgba(30, 27, 75, 0.4) 100%)',
-              border: '1px solid rgba(99, 102, 241, 0.25)',
-              boxShadow: '0 4px 15px rgba(0, 0, 0, 0.3)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-              <span style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', color: '#818cf8', letterSpacing: '0.04em' }}>
-                Partner Tier
-              </span>
-              <span className="badge ACTIVE" style={{ fontSize: '0.62rem', padding: '0.1rem 0.4rem' }}>
-                ACTIVE
-              </span>
-            </div>
-            <div style={{ fontWeight: 700, fontSize: '0.86rem', color: '#ffffff', marginBottom: '0.15rem' }}>
-              {businessName}
-            </div>
-            <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
-              Earn recurring monthly commissions on active SaaS customers.
-            </div>
-          </div>
+          {/* Partner Tier Card: real level + rate from GET /commissions/summary */}
+          <PartnerTierCard summary={partnerSummary} />
+          <ApplicationStatusCard user={user} />
         </aside>
 
-        {/* Reseller Main Content View */}
-        <main className="reseller-content" style={{ flex: 1, minWidth: 0, padding: '1.75rem 2.25rem', background: '#080b11' }}>
-          {children(user)}
+        {/* Partner Main Content View */}
+        <main
+          className="reseller-content"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: '1.75rem 2.25rem',
+            background: 'var(--bg)',
+            transition: 'background 0.2s ease',
+          }}
+        >
+          <PartnerSummaryProvider value={partnerSummary}>{blocked ? null : children(user)}</PartnerSummaryProvider>
         </main>
       </div>
+
+      {/* Shown once when the backend has recorded a new level for this seller (outside the sidebar so it can cover the page) */}
+      <LevelUpCelebration summary={partnerSummary} resellerId={user.resellerId} />
+
+      {/* One-time welcome (first login, application not submitted) and "approved" popups */}
+      <ApplicationPopups user={user} />
     </div>
   )
 }

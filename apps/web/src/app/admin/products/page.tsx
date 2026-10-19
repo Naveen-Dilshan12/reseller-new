@@ -12,6 +12,8 @@ import {
   type ProductDetail,
   type ProductListItem,
 } from '@/lib/product-types'
+import { Modal } from '@/components/ui/Modal'
+import { AdminPageHeader } from '@/components/admin/AdminPageHeader'
 
 const emptyForm = {
   code: '',
@@ -33,6 +35,7 @@ export default function ProductsPage() {
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
+    setError(null)
     api<ProductListItem[]>('/admin/saas-products')
       .then(setItems)
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load products'))
@@ -64,27 +67,33 @@ export default function ProductsPage() {
 
   return (
     <main className="container">
-      <div className="row" style={{ marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>SaaS products</h1>
-        <span className="spacer" />
-        <button
-          className="btn"
-          onClick={() => {
-            setForm(emptyForm)
-            setFormError(null)
-            setOpen(true)
-          }}
+      <AdminPageHeader
+        title="SaaS products"
+        subtitle="Existing Hexalyte SaaS products partners can sell. Each SaaS stays the source of truth for its tenants, billing and business data; this platform only keeps the catalogue entry and the server-side connection settings."
+        actions={
+          <button
+            className="btn"
+            onClick={() => {
+              setForm(emptyForm)
+              setFormError(null)
+              setOpen(true)
+            }}
         >
-          New product
-        </button>
-      </div>
-      <p className="muted">
-        Existing Hexalyte SaaS products resellers can sell. Each SaaS stays the source of truth for its tenants, billing and
-        business data; this platform only keeps the catalogue entry and the server-side connection settings.
-      </p>
+            New product
+          </button>
+        }
+      />
 
-      {error && <div className="alert error">{error}</div>}
+      {error && (
+        <div className="alert error">
+          {error}{' '}
+          <button className="btn secondary small" onClick={load}>
+            Retry
+          </button>
+        </div>
+      )}
 
+      {(items || !error) && (
       <div className="card">
         {!items ? (
           <p className="muted">Loading…</p>
@@ -100,7 +109,7 @@ export default function ProductsPage() {
                   <th>Monthly price</th>
                   <th>Trial</th>
                   <th>Integration</th>
-                  <th>Resellers</th>
+                  <th>Partners</th>
                   <th>Accounts</th>
                 </tr>
               </thead>
@@ -129,10 +138,10 @@ export default function ProductsPage() {
           </div>
         )}
       </div>
+      )}
 
       {open && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal wide">
+        <Modal label={'New SaaS product'} onClose={() => setOpen(false)} wide>
             <h2>New SaaS product</h2>
             <p className="small muted">
               Registers an existing Hexalyte SaaS. It starts in manual fulfilment; connect its partner API afterwards.
@@ -187,8 +196,7 @@ export default function ProductsPage() {
                 Create product
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

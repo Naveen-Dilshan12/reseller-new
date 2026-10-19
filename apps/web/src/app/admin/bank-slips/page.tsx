@@ -6,6 +6,8 @@ import { apiRequest, ApiError } from '@/lib/api'
 import { formatMoney, monthLabel } from '@/lib/format'
 import { ACTIVATION_STATUS_LABELS, formatBytes, type ActivationStatus, type BankSlipInfo } from '@/lib/activation-types'
 import { BankSlipViewer } from '@/components/activations/ActivationParts'
+import { Modal } from '@/components/ui/Modal'
+import { AdminPageHeader } from '@/components/admin/AdminPageHeader'
 
 interface SlipRow extends BankSlipInfo {
   uploadedTimes: number
@@ -39,6 +41,7 @@ export default function BankSlipsPage() {
   const [page, setPage] = useState(1)
   const [items, setItems] = useState<SlipRow[] | null>(null)
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 })
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewing, setViewing] = useState<SlipRow | null>(null)
 
@@ -47,32 +50,47 @@ export default function BankSlipsPage() {
     if (status) params.set('status', status)
     if (duplicatesOnly) params.set('duplicatesOnly', 'true')
     if (search.trim()) params.set('search', search.trim())
+    setLoading(true)
+    setError(null)
     apiRequest<SlipRow[]>(`/bank-slips?${params}`)
       .then((r) => {
+        const total = r.meta?.total ?? 0
+        const totalPages = r.meta?.totalPages || 1
+        // The page asked for no longer exists (its rows moved on): go to the last real page instead of showing
+        // "No bank slips found" with no way back. `loading` stays on until that page arrives.
+        if (r.data.length === 0 && total > 0 && page > totalPages) {
+          setPage(totalPages)
+          return
+        }
         setItems(r.data)
-        setMeta({ total: r.meta?.total ?? 0, totalPages: r.meta?.totalPages || 1 })
-        setError(null)
+        setMeta({ total, totalPages })
+        setLoading(false)
       })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load bank slips'))
+      .catch((err) => {
+        setItems(null)
+        setMeta({ total: 0, totalPages: 1 })
+        setError(err instanceof ApiError ? err.message : 'Failed to load bank slips')
+        setLoading(false)
+      })
   }, [status, duplicatesOnly, search, page])
 
   useEffect(load, [status, duplicatesOnly, page]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <main className="container">
-      <h1>Bank slips</h1>
-      <p className="muted">
-        Slips uploaded with activation requests. Files are stored encrypted in private storage; every time a slip is
-        opened, the viewer is recorded in the audit log.
-      </p>
+      <AdminPageHeader
+        title="Bank slips"
+        subtitle="Slips uploaded with activation requests. Files are stored encrypted in private storage; every time a slip is opened, the viewer is recorded in the audit log."
+      />
       <div className="card">
         <form
           className="row"
           style={{ marginBottom: '0.75rem' }}
           onSubmit={(e) => {
             e.preventDefault()
-            setPage(1)
-            load()
+            // Changing the page reloads by itself; calling load() as well would also request the old page.
+            if (page !== 1) setPage(1)
+            else load()
           }}
         >
           <div className="field inline">
@@ -112,9 +130,16 @@ export default function BankSlipsPage() {
           </button>
         </form>
 
-        {error && <div className="alert error">{error}</div>}
+        {error && (
+          <div className="alert error">
+            {error}{' '}
+            <button className="btn secondary small" onClick={load} disabled={loading}>
+              Retry
+            </button>
+          </div>
+        )}
         {!items ? (
-          <p className="muted">Loading…</p>
+          error ? null : <p className="muted">Loading…</p>
         ) : items.length === 0 ? (
           <p className="muted">No bank slips found.</p>
         ) : (
@@ -124,7 +149,7 @@ export default function BankSlipsPage() {
                 <tr>
                   <th>Request</th>
                   <th>Customer / product</th>
-                  <th>Reseller</th>
+                  <th>Partner</th>
                   <th className="num">Amount</th>
                   <th>Bank reference</th>
                   <th>File</th>
@@ -178,10 +203,10 @@ export default function BankSlipsPage() {
               Page {page} of {meta.totalPages} · {meta.total} slips
             </span>
             <span className="spacer" />
-            <button className="btn secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+            <button className="btn secondary" disabled={loading || page <= 1} onClick={() => setPage((p) => p - 1)}>
               Previous
             </button>
-            <button className="btn secondary" disabled={page >= meta.totalPages} onClick={() => setPage((p) => p + 1)}>
+            <button className="btn secondary" disabled={loading || page >= meta.totalPages} onClick={() => setPage((p) => p + 1)}>
               Next
             </button>
           </div>
@@ -189,8 +214,7 @@ export default function BankSlipsPage() {
       </div>
 
       {viewing && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal wide">
+        <Modal label={'Bank slip'} onClose={() => setViewing(null)} wide>
             <div className="row">
               <h2 style={{ margin: 0 }}>
                 Bank slip · <span className="mono">{viewing.activationRequest.reference}</span>
@@ -201,8 +225,7 @@ export default function BankSlipsPage() {
               </button>
             </div>
             <BankSlipViewer requestId={viewing.activationRequest.id} slip={viewing} />
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

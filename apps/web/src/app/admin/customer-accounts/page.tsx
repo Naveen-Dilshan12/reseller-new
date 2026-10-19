@@ -4,7 +4,11 @@ import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { api, apiRequest, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
-import { currentPeriod, formatDate, formatMoney, monthLabel } from '@/lib/format'
+import { billingWindow, BUSINESS_TIMEZONE, businessPeriod, formatDate, formatMoney, monthLabel } from '@/lib/format'
+import { Modal } from '@/components/ui/Modal'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { Pagination, type PaginationMeta } from '@/components/ui/Pagination'
+import { AdminPageHeader } from '@/components/admin/AdminPageHeader'
 
 interface Account {
   id: string
@@ -35,6 +39,17 @@ const EVENT_LABELS: Record<EventType, string> = {
   REFUNDED: 'Payment refunded',
 }
 
+/**
+ * The events worth offering for an account in this state. The server decides what is allowed; this only keeps
+ * the dialog from offering what it will refuse: an unpaid trial has nothing to cancel or refund, and a cancelled
+ * account is not reactivated by a manual payment event (it goes through a paid activation request).
+ */
+function eventTypesFor(status: string): EventType[] {
+  if (status === 'TRIAL' || status === 'PENDING') return ['PAYMENT_VERIFIED']
+  if (status === 'CANCELLED') return ['REFUNDED']
+  return ['PAYMENT_VERIFIED', 'CANCELLED', 'REFUNDED']
+}
+
 const emptyLink = {
   resellerId: '',
   productId: '',
@@ -52,23 +67,38 @@ export default function CustomerAccountsPage() {
 
   const [items, setItems] = useState<Account[]>([])
   const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
+  const [meta, setMeta] = useState<PaginationMeta | null>(null)
   const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
   const [resellers, setResellers] = useState<Option[]>([])
   const [products, setProducts] = useState<Option[]>([])
+  const [optionsLoading, setOptionsLoading] = useState(false)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
   const [linkOpen, setLinkOpen] = useState(false)
   const [link, setLink] = useState(emptyLink)
   const [customers, setCustomers] = useState<Option[]>([])
+  const [customersError, setCustomersError] = useState<string | null>(null)
   const [live, setLive] = useState<Record<string, LiveStatus | 'loading' | { error: string }>>({})
 
   useEffect(() => {
     setCustomers([])
-    if (!link.resellerId) return
+    setCustomersError(null)
+    if (!link.resellerId) return undefined
+    let stale = false
     api<{ id: string; displayName: string }[]>(`/customers?resellerId=${link.resellerId}&limit=100`)
-      .then((r) => setCustomers(r.map((c) => ({ id: c.id, label: c.displayName }))))
-      .catch(() => setCustomers([]))
+      .then((r) => {
+        if (!stale) setCustomers(r.map((c) => ({ id: c.id, label: c.displayName })))
+      })
+      .catch((err) => {
+        if (!stale) setCustomersError(err instanceof ApiError ? err.message : 'Failed to load customers')
+      })
+    return () => {
+      stale = true
+    }
   }, [link.resellerId])
 
   const checkLive = async (id: string) => {
@@ -82,35 +112,69 @@ export default function CustomerAccountsPage() {
   }
 
   const [eventFor, setEventFor] = useState<Account | null>(null)
-  const [event, setEvent] = useState({ type: 'PAYMENT_VERIFIED' as EventType, periodMonth: currentPeriod(), externalRef: '', note: '', endSubscription: true })
+  const [event, setEvent] = useState({ type: 'PAYMENT_VERIFIED' as EventType, periodMonth: businessPeriod(), externalRef: '', note: '', endSubscription: true })
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  /** Months the server accepts for an event (last month … two months ahead, business time); recomputed on every render. */
+  const billing = billingWindow()
+
+  const openEvent = (account: Account) => {
+    setDialogError(null)
+    setEvent({ type: eventTypesFor(account.status)[0], periodMonth: businessPeriod(), externalRef: '', note: '', endSubscription: true })
+    setEventFor(account)
+  }
+
   const load = useCallback(() => {
-    const params = new URLSearchParams({ limit: '50' })
+    const params = new URLSearchParams({ limit: '25', page: String(page) })
     if (status) params.set('status', status)
     if (search.trim()) params.set('search', search.trim())
+    setLoading(true)
+    setError(null)
     apiRequest<Account[]>(`/customer-accounts?${params}`)
       .then((r) => {
+        const next = (r.meta as unknown as PaginationMeta) ?? null
+        // The page asked for no longer exists (its rows moved or were filtered away): go to the last real page
+        // instead of showing "no accounts" with no way back. `loading` stays on until that page arrives.
+        if (next && r.data.length === 0 && next.total > 0 && page > next.totalPages) {
+          setPage(next.totalPages)
+          return
+        }
         setItems(r.data)
-        setError(null)
+        setMeta(next)
+        setLoading(false)
       })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load customers'))
-  }, [status, search])
+      .catch((err) => {
+        setItems([])
+        setMeta(null)
+        setError(err instanceof ApiError ? err.message : 'Failed to load customers')
+        setLoading(false)
+      })
+  }, [status, search, page])
 
-  useEffect(load, [status]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [status, page]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const openLink = async () => {
-    setDialogError(null)
-    setLinkOpen(true)
-    if (resellers.length === 0) {
+  const loadOptions = async () => {
+    setOptionsLoading(true)
+    setOptionsError(null)
+    try {
       const [r, p] = await Promise.all([
         api<{ id: string; businessName: string; code: string }[]>('/admin/reseller-applications?status=ACTIVE&limit=100'),
         api<{ id: string; name: string; status: string }[]>('/products'),
       ])
       setResellers(r.map((x) => ({ id: x.id, label: `${x.businessName} (${x.code})` })))
       setProducts(p.filter((x) => x.status === 'ACTIVE').map((x) => ({ id: x.id, label: x.name })))
+    } catch (err) {
+      setOptionsError(err instanceof ApiError ? err.message : 'Failed to load partners and products')
+    } finally {
+      setOptionsLoading(false)
     }
+  }
+
+  const openLink = () => {
+    setDialogError(null)
+    setLinkOpen(true)
+    if (resellers.length === 0) void loadOptions()
   }
 
   const submitLink = async () => {
@@ -147,6 +211,7 @@ export default function CustomerAccountsPage() {
         commission: { amount: string; currency: string } | null
         reversed: { id: string }[]
         level: { level: number | null; activeCustomerCount: number; changed: boolean }
+        subscriptionEnded: boolean
       }>('/subscription-events', {
         method: 'POST',
         body: JSON.stringify({
@@ -161,8 +226,16 @@ export default function CustomerAccountsPage() {
       const parts = [`${EVENT_LABELS[event.type]} recorded for ${eventFor.customer.displayName}.`]
       if (result.commission) parts.push(`Commission ${formatMoney(result.commission.amount, result.commission.currency)} generated (pending approval).`)
       if (result.reversed.length) parts.push(`${result.reversed.length} commission(s) reversed.`)
+      if (result.subscriptionEnded) parts.push('The subscription has ended.')
+      else if (event.type === 'REFUNDED') {
+        parts.push(
+          event.endSubscription
+            ? 'The subscription was not ended: only refunding the current month ends it. Record a Cancelled event to end it.'
+            : 'The subscription was kept.',
+        )
+      }
       parts.push(
-        `Reseller now has ${result.level.activeCustomerCount} active customers${result.level.level ? ` (Level ${result.level.level})` : ''}${result.level.changed ? ' – level changed' : ''}.`,
+        `Partner now has ${result.level.activeCustomerCount} active customers${result.level.level ? ` (Level ${result.level.level})` : ''}${result.level.changed ? ' – level changed' : ''}.`,
       )
       setMessage(parts.join(' '))
       setEventFor(null)
@@ -199,54 +272,79 @@ export default function CustomerAccountsPage() {
 
   return (
     <main className="container">
-      <div className="row" style={{ marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>Customer accounts</h1>
-        <span className="spacer" />
-        {canLink && (
-          <button className="btn" onClick={openLink}>
-            Link SaaS account
-          </button>
-        )}
-      </div>
-      <p className="muted">
-        Each row maps a reseller&apos;s customer to a tenant in a Hexalyte SaaS. Only identifiers are stored here; the
-        customer&apos;s business data stays in the SaaS. Record subscription outcomes only after the payment has been verified
-        and the account activated in the SaaS.
-      </p>
+      <AdminPageHeader
+        title="Customer accounts"
+        subtitle="Each row maps a partner's customer to a tenant in a Hexalyte SaaS. Only identifiers are stored here; the customer's business data stays in the SaaS. Record subscription outcomes only after the payment has been verified and the account activated in the SaaS."
+        actions={
+          canLink ? (
+            <button className="btn" onClick={openLink}>
+              Link SaaS account
+            </button>
+          ) : undefined
+        }
+      />
 
       {message && <div className="alert success">{message}</div>}
-      {error && <div className="alert error">{error}</div>}
+      {error && (
+        <div className="alert error">
+          {error}{' '}
+          <button className="btn secondary small" onClick={load} disabled={loading}>
+            Retry
+          </button>
+        </div>
+      )}
 
-      <div className="card">
-        <form
-          className="row"
-          style={{ marginBottom: '0.75rem' }}
-          onSubmit={(e) => {
-            e.preventDefault()
-            load()
-          }}
-        >
-          <div className="field inline">
-            <label htmlFor="acc-status">Status</label>
-            <select id="acc-status" value={status} onChange={(e) => setStatus(e.target.value)}>
-              {['', 'PENDING', 'TRIAL', 'ACTIVE', 'SUSPENDED', 'CANCELLED'].map((s) => (
-                <option key={s} value={s}>
-                  {s || 'All'}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field inline" style={{ flex: 1 }}>
-            <label htmlFor="acc-search">Search</label>
+      <form
+        className="filter-bar"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (page !== 1) setPage(1)
+          else load()
+        }}
+      >
+        <div className="field inline">
+          <label htmlFor="acc-status">Status</label>
+          <select
+            id="acc-status"
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value)
+              setPage(1)
+            }}
+          >
+            {['', 'PENDING', 'TRIAL', 'ACTIVE', 'SUSPENDED', 'CANCELLED'].map((s) => (
+              <option key={s} value={s}>
+                {s || 'All'}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field inline search-field">
+          <label htmlFor="acc-search">Search</label>
+          <div className="filter-search-wrap">
             <input id="acc-search" placeholder="Customer name, tenant ID or account ID" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
-          <button className="btn secondary" type="submit">
+        </div>
+        <div className="filter-actions">
+          <button className="btn secondary small" type="submit">
             Search
           </button>
-        </form>
+        </div>
+      </form>
 
         {items.length === 0 ? (
-          <p className="muted">No customer accounts.</p>
+          loading ? (
+            <p className="muted">Loading…</p>
+          ) : error ? null : (
+            <>
+              <EmptyState title="No customer accounts found" hint="Linked partner customers and their SaaS tenants will appear here." />
+              {meta && meta.totalPages > 1 && (
+                <div className="table-wrap">
+                  <Pagination meta={meta} onPage={setPage} noun="accounts" />
+                </div>
+              )}
+            </>
+          )
         ) : (
           <div className="table-wrap">
             <table>
@@ -254,7 +352,7 @@ export default function CustomerAccountsPage() {
                 <tr>
                   <th>Customer</th>
                   <th>Product / external IDs</th>
-                  <th>Reseller</th>
+                  <th>Partner</th>
                   <th>Status</th>
                   <th>Active since</th>
                   <th />
@@ -284,14 +382,7 @@ export default function CustomerAccountsPage() {
                         </button>
                       )}
                       {canRecord && (
-                        <button
-                          className="btn link small"
-                          onClick={() => {
-                            setDialogError(null)
-                            setEvent({ type: 'PAYMENT_VERIFIED', periodMonth: currentPeriod(), externalRef: '', note: '', endSubscription: true })
-                            setEventFor(a)
-                          }}
-                        >
+                        <button className="btn link small" onClick={() => openEvent(a)}>
                           Record subscription event
                         </button>
                       )}
@@ -300,18 +391,26 @@ export default function CustomerAccountsPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination meta={meta} onPage={setPage} noun="accounts" busy={loading} />
           </div>
         )}
-      </div>
 
       {linkOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal wide">
-            <h2>Link SaaS account to reseller</h2>
+        <Modal label={'Link SaaS account to partner'} onClose={() => setLinkOpen(false)} wide>
+            <h2>Link SaaS account to partner</h2>
             {dialogError && <div className="alert error">{dialogError}</div>}
+            {optionsError && (
+              <div className="alert error">
+                {optionsError}{' '}
+                <button className="btn secondary small" onClick={loadOptions} disabled={optionsLoading}>
+                  Retry
+                </button>
+              </div>
+            )}
+            {optionsLoading && <p className="muted small">Loading partners and products…</p>}
             <div className="grid-2">
               <div className="field">
-                <label htmlFor="link-reseller">Reseller</label>
+                <label htmlFor="link-reseller">Partner</label>
                 <select
                   id="link-reseller"
                   value={link.resellerId}
@@ -351,21 +450,23 @@ export default function CustomerAccountsPage() {
                     </option>
                   ))}
                 </select>
+                {customersError && (
+                  <span className="hint negative">
+                    Could not load this partner&apos;s customers ({customersError}). You can still enter a new customer name.
+                  </span>
+                )}
               </div>
               {link.customerId ? (
                 <div />
               ) : (
-                linkField('customerName', 'New customer name', 'Reseller-side reference only')
+                linkField('customerName', 'New customer name', 'Reseller-side reference only. A customer with the same name is reused.')
               )}
               {linkField('externalTenantId', 'External tenant ID', 'Tenant ID inside the SaaS')}
               {linkField('externalAccountId', 'External account ID (optional)', 'Owner / admin user ID inside the SaaS')}
               <div className="field">
                 <label htmlFor="link-status">Current status</label>
-                <select id="link-status" value={link.status} onChange={(e) => setLink((l) => ({ ...l, status: e.target.value }))}>
-                  <option value="TRIAL">Trial</option>
-                  <option value="PENDING">Pending</option>
-                </select>
-                <span className="hint">Paid accounts become ACTIVE via a “Payment verified” event.</span>
+                <input id="link-status" value="Trial" readOnly disabled />
+                <span className="hint">An existing tenant is always linked as a trial. Paid accounts become ACTIVE via a “Payment verified” event.</span>
               </div>
             </div>
             <div className="row">
@@ -373,17 +474,15 @@ export default function CustomerAccountsPage() {
               <button className="btn secondary" onClick={() => setLinkOpen(false)} disabled={busy}>
                 Cancel
               </button>
-              <button className="btn" onClick={submitLink} disabled={busy}>
+              <button className="btn" onClick={submitLink} disabled={busy || optionsLoading}>
                 Link account
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {eventFor && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+        <Modal label={'Record subscription event'} onClose={() => setEventFor(null)}>
             <h2>Record subscription event</h2>
             <p className="small muted">
               {eventFor.customer.displayName} · {eventFor.product.name} · {eventFor.reseller.businessName}
@@ -392,17 +491,36 @@ export default function CustomerAccountsPage() {
             <div className="field">
               <label htmlFor="ev-type">Event</label>
               <select id="ev-type" value={event.type} onChange={(e) => setEvent((s) => ({ ...s, type: e.target.value as EventType }))}>
-                {(Object.keys(EVENT_LABELS) as EventType[]).map((t) => (
+                {eventTypesFor(eventFor.status).map((t) => (
                   <option key={t} value={t}>
                     {EVENT_LABELS[t]}
                   </option>
                 ))}
               </select>
+              {(eventFor.status === 'TRIAL' || eventFor.status === 'PENDING') && (
+                <span className="hint">Cancelled and Refunded events apply only to paid subscriptions, so they are not offered for an unpaid trial.</span>
+              )}
+              {eventFor.status === 'CANCELLED' && (
+                <span className="hint">
+                  This account is cancelled. A manual payment event cannot reactivate it; a cancelled subscription is reactivated through a paid
+                  activation request.
+                </span>
+              )}
             </div>
             <div className="field">
               <label htmlFor="ev-month">Billing month</label>
-              <input id="ev-month" type="month" value={event.periodMonth} onChange={(e) => setEvent((s) => ({ ...s, periodMonth: e.target.value }))} />
+              <input
+                id="ev-month"
+                type="month"
+                value={event.periodMonth}
+                min={billing.from}
+                max={billing.to}
+                onChange={(e) => setEvent((s) => ({ ...s, periodMonth: e.target.value }))}
+              />
               <span className="hint">{event.periodMonth && monthLabel(event.periodMonth)}</span>
+              <span className="hint">
+                Allowed billing months: {monthLabel(billing.from)} to {monthLabel(billing.to)} ({BUSINESS_TIMEZONE} time)
+              </span>
             </div>
             <div className="field">
               <label htmlFor="ev-ref">SaaS payment / invoice reference</label>
@@ -415,7 +533,8 @@ export default function CustomerAccountsPage() {
                   checked={event.endSubscription}
                   onChange={(e) => setEvent((s) => ({ ...s, endSubscription: e.target.checked }))}
                 />
-                Refund also ends the subscription (customer no longer counts as active)
+                Refund also ends the subscription, only when refunding the current month (customer no longer counts as active). A refund of any
+                other month only reverses that month&apos;s commission.
               </label>
             )}
             <div className="field">
@@ -424,8 +543,8 @@ export default function CustomerAccountsPage() {
             </div>
             {event.type === 'PAYMENT_VERIFIED' && (
               <div className="alert info small">
-                Only record this after the payment has been verified and the subscription activated in the SaaS. A monthly
-                commission will be generated at the reseller&apos;s level rate.
+                Only record this after the payment has been verified and the subscription activated in the SaaS. The account needs a linked tenant
+                and no open activation request. A monthly commission will be generated at the partner&apos;s level rate.
               </div>
             )}
             <div className="row">
@@ -437,8 +556,7 @@ export default function CustomerAccountsPage() {
                 Record
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

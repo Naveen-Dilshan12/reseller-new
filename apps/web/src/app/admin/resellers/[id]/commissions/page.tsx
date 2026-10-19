@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
-import { formatMoney } from '@/lib/format'
+import { businessDate, formatMoney } from '@/lib/format'
 import type { CommissionSummary } from '@/lib/commission-types'
 import { Tabs } from '@/components/Tabs'
 import { LevelSummary } from '@/components/commissions/LevelSummary'
@@ -13,6 +13,7 @@ import { CommissionLedger } from '@/components/commissions/CommissionLedger'
 import { CustomerCommissions } from '@/components/commissions/CustomerCommissions'
 import { MonthlyReport } from '@/components/commissions/MonthlyReport'
 import { PayoutHistory } from '@/components/commissions/PayoutHistory'
+import { Modal } from '@/components/ui/Modal'
 
 type Tab = 'history' | 'customers' | 'monthly' | 'payouts'
 
@@ -26,7 +27,7 @@ export default function ResellerCommissionsAdminPage() {
   const [tab, setTab] = useState<Tab>('history')
   const [refreshKey, setRefreshKey] = useState(0)
   const [payOpen, setPayOpen] = useState(false)
-  const [payment, setPayment] = useState({ reference: '', paidAt: new Date().toISOString().slice(0, 10), note: '' })
+  const [payment, setPayment] = useState({ reference: '', paidAt: businessDate(), note: '' })
   const [payError, setPayError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -47,6 +48,14 @@ export default function ResellerCommissionsAdminPage() {
       setPayError('Enter the bank transfer / payment reference.')
       return
     }
+    if (!payment.paidAt) {
+      setPayError('Enter the date the payment was made.')
+      return
+    }
+    if (payment.paidAt > businessDate()) {
+      setPayError('Payment date cannot be in the future.')
+      return
+    }
     setBusy(true)
     try {
       const result = await api<{ totalAmount: string; entries: number }>('/commissions/payouts', {
@@ -60,10 +69,16 @@ export default function ResellerCommissionsAdminPage() {
       })
       setMessage(`Payout of ${formatMoney(result.totalAmount)} recorded for ${result.entries} commission entries.`)
       setPayOpen(false)
-      setPayment({ reference: '', paidAt: new Date().toISOString().slice(0, 10), note: '' })
+      setPayment({ reference: '', paidAt: businessDate(), note: '' })
       refresh()
     } catch (err) {
-      setPayError(err instanceof ApiError ? err.message : 'Payout failed')
+      setPayError(
+        err instanceof ApiError
+          ? err.status === 422 && err.errors.length
+            ? err.errors.map((e) => e.replace(/^[\w.]+: /, '')).join(' ')
+            : err.message
+          : 'Payout failed',
+      )
     } finally {
       setBusy(false)
     }
@@ -77,7 +92,7 @@ export default function ResellerCommissionsAdminPage() {
   return (
     <main className="container">
       <Link href={`/admin/reseller-applications/${id}`} className="small">
-        ← Reseller profile
+        ← Partner profile
       </Link>
       {' · '}
       <Link href={`/admin/resellers/${id}/products`} className="small">
@@ -118,8 +133,7 @@ export default function ResellerCommissionsAdminPage() {
       </div>
 
       {payOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+        <Modal label={'Record commission payout'} onClose={() => setPayOpen(false)}>
             <h2>Record commission payout</h2>
             <p>
               All payable entries (net of clawbacks) will be marked as paid:{' '}
@@ -140,6 +154,7 @@ export default function ResellerCommissionsAdminPage() {
               <input
                 id="pay-date"
                 type="date"
+                max={businessDate()}
                 value={payment.paidAt}
                 onChange={(e) => setPayment((p) => ({ ...p, paidAt: e.target.value }))}
               />
@@ -157,8 +172,7 @@ export default function ResellerCommissionsAdminPage() {
                 {busy ? 'Saving…' : 'Mark as paid'}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

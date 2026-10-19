@@ -49,6 +49,7 @@ export interface AdminDashboard {
     openActivations: number
     bankSlips: number | null
     unreadNotifications: number
+    pendingDemoRequests: number | null
   }
 }
 
@@ -84,13 +85,20 @@ export interface AdminReseller {
   suspendedAt: string | null
   suspensionReason: string | null
   customers: number
+  /** All customer accounts (customer × product); `activeCustomerCount` counts the active ones. */
+  customerAccounts: number
   users: number
   openActivationRequests: number
   unpaidCommission: string
 }
 
-/** e.g. RESELLER_APPLICATION_APPROVED → "Reseller application approved" */
+/** Stored identifiers keep "reseller"; people see "Partner". */
+export function partnerWording(text: string) {
+  return text.replace(/\bresellers\b/gi, (m) => (m[0] === 'R' ? 'Partners' : 'partners')).replace(/\breseller\b/gi, (m) => (m[0] === 'R' ? 'Partner' : 'partner'))
+}
+
+/** e.g. RESELLER_APPLICATION_APPROVED → "Partner application approved" */
 export function humanizeAction(action: string) {
   const s = action.toLowerCase().replace(/_/g, ' ')
-  return s.charAt(0).toUpperCase() + s.slice(1)
+  return partnerWording(s.charAt(0).toUpperCase() + s.slice(1))
 }

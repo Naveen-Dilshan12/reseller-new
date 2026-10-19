@@ -68,6 +68,10 @@ export interface ResellerDashboard {
           CustomerRef)[]
       | null
   }
+  analytics: {
+    customerGrowth: { month: string; count: number }[]
+    commissionEarnings: { month: string; earned: string; paid: string }[] | null
+  }
 }
 
 export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {

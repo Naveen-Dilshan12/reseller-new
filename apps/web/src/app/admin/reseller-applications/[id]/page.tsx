@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
 import { ResellerStatusDialog } from '@/components/admin/ResellerStatusDialog'
+import { Modal } from '@/components/ui/Modal'
 
 interface Application {
   id: string
@@ -103,7 +104,7 @@ export default function ApplicationReviewPage() {
           method: 'POST',
           body: JSON.stringify(note.trim() ? { note: note.trim() } : {}),
         })
-        setSuccess('Application approved. The reseller can now log in.')
+        setSuccess('Application approved. The partner can now log in.')
       } else {
         await api(`/admin/reseller-applications/${id}/reject`, {
           method: 'POST',
@@ -249,11 +250,11 @@ export default function ApplicationReviewPage() {
           <span className="spacer" />
           {app.status === 'ACTIVE' ? (
             <button className="btn danger" onClick={() => setStatusAction('suspend')}>
-              Suspend reseller
+              Suspend partner
             </button>
           ) : (
             <button className="btn success" onClick={() => setStatusAction('reactivate')}>
-              Reactivate reseller
+              Reactivate partner
             </button>
           )}
         </div>
@@ -285,8 +286,7 @@ export default function ApplicationReviewPage() {
       )}
 
       {dialog && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal">
+        <Modal label={dialog === 'approve' ? 'Approve application' : 'Reject application'} onClose={() => setDialog(null)}>
             <h2>{dialog === 'approve' ? 'Approve application' : 'Reject application'}</h2>
             {dialogError && <div className="alert error">{dialogError}</div>}
 
@@ -294,7 +294,7 @@ export default function ApplicationReviewPage() {
               <>
                 <p className="muted small">
                   {app.business.businessName} will be activated and can log in immediately. The commission rate is
-                  set automatically from the reseller level, and access to all active SaaS products is granted (adjustable
+                  set automatically from the partner level, and access to all active SaaS products is granted (adjustable
                   afterwards).
                 </p>
                 <div className="field">
@@ -325,8 +325,7 @@ export default function ApplicationReviewPage() {
                 {busy ? 'Saving…' : dialog === 'approve' ? 'Approve' : 'Reject'}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   )

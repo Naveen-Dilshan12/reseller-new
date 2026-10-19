@@ -52,7 +52,7 @@ export function LevelSummary({ summary }: { summary: CommissionSummary }) {
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
           {summary.commissionPerCustomer
-            .map((p) => `${p.product}: ${formatMoney(p.amount, p.currency)} per customer / month (${Number(level.effectiveRatePercent)}% of ${formatMoney(p.baseAmount, p.currency)})`)
+            .map((p) => `${p.product}: ${formatMoney(p.amount, p.currency)} per customer / month (${Number(level.effectiveRatePercent)}% of ${formatMoney(p.baseAmount, p.currency)}); Hexalyte keeps ${formatMoney(p.hexalyteAmount, p.currency)}`)
             .join(' · ')}
         </p>
       </div>

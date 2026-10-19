@@ -1,8 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { apiRequest, ApiError } from '@/lib/api'
+import { formatDate } from '@/lib/format'
+import { AdminPageHeader } from '@/components/admin/AdminPageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { Pagination, type PaginationMeta } from '@/components/ui/Pagination'
+import { createLatestLoader, INITIAL_LIST_VIEW, listQuery, outOfRangePage, withPage, withSearch, withStatus, type ListView } from '@/lib/paged-list'
 
 interface ApplicationSummary {
   id: string
@@ -17,6 +22,7 @@ interface ApplicationSummary {
   reviewedAt: string | null
 }
 
+const PAGE_SIZE = 20
 const TABS = [
   { key: 'PENDING', label: 'Pending' },
   { key: 'ACTIVE', label: 'Approved' },
@@ -25,53 +31,64 @@ const TABS = [
 ]
 
 export default function ApplicationsPage() {
-  const [status, setStatus] = useState('PENDING')
+  const [view, setView] = useState<ListView>({ ...INITIAL_LIST_VIEW, status: 'PENDING' })
   const [search, setSearch] = useState('')
-  const [query, setQuery] = useState('')
-  const [page, setPage] = useState(1)
-  const [items, setItems] = useState<ApplicationSummary[]>([])
-  const [meta, setMeta] = useState({ total: 0, totalPages: 1, pendingCount: 0 })
+  const [loadLatest] = useState(createLatestLoader)
+  const [items, setItems] = useState<ApplicationSummary[] | null>(null)
+  const [meta, setMeta] = useState<PaginationMeta | null>(null)
+  const [pendingCount, setPendingCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const params = new URLSearchParams({ page: String(page), limit: '20' })
-    if (status) params.set('status', status)
-    if (query) params.set('search', query)
+  // Only the newest request may update the screen, so a slow older response cannot overwrite a newer one.
+  const load = useCallback(() => {
     setLoading(true)
-    apiRequest<ApplicationSummary[]>(`/admin/reseller-applications?${params}`)
-      .then((res) => {
+    loadLatest(() => apiRequest<ApplicationSummary[]>(`/admin/reseller-applications?${listQuery(view, PAGE_SIZE)}`), {
+      onSuccess: (res) => {
+        const lastPage = outOfRangePage(view.page, res.meta?.total, res.meta?.totalPages)
+        if (lastPage !== null) {
+          // The list shrank while the admin was on a later page: go to the last real page, which reloads.
+          setView((v) => withPage(v, lastPage))
+          return
+        }
         setItems(res.data)
         setMeta({
           total: res.meta?.total ?? 0,
+          page: res.meta?.page ?? view.page,
+          limit: res.meta?.limit ?? PAGE_SIZE,
           totalPages: res.meta?.totalPages || 1,
-          pendingCount: Number(res.meta?.pendingCount ?? 0),
         })
+        setPendingCount(Number(res.meta?.pendingCount ?? 0))
         setError(null)
-      })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load applications'))
-      .finally(() => setLoading(false))
-  }, [status, query, page])
+        setLoading(false)
+      },
+      onError: (err) => {
+        setError(err instanceof ApiError ? err.message : 'Failed to load applications')
+        setLoading(false)
+      },
+    })
+  }, [view, loadLatest])
+
+  useEffect(load, [load])
 
   return (
     <main className="container">
-      <div className="row" style={{ marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>Reseller applications</h1>
-        {meta.pendingCount > 0 && <span className="badge PENDING">{meta.pendingCount} pending</span>}
-      </div>
+      <AdminPageHeader
+        title="Partner applications"
+        subtitle="New partner sign-ups waiting for review. Open an application to approve or reject it; approved partners move to the Partners list."
+        actions={
+          <Link href="/admin/resellers" className="btn secondary">
+            Partners
+          </Link>
+        }
+      />
 
       <div className="card">
         <div className="tabs">
           {TABS.map((t) => (
-            <button
-              key={t.key}
-              className={`tab ${status === t.key ? 'active' : ''}`}
-              onClick={() => {
-                setStatus(t.key)
-                setPage(1)
-              }}
-            >
+            <button key={t.key} className={`tab ${view.status === t.key ? 'active' : ''}`} onClick={() => setView((v) => withStatus(v, t.key))}>
               {t.label}
+              {t.key === 'PENDING' && pendingCount > 0 ? ` (${pendingCount})` : ''}
             </button>
           ))}
         </div>
@@ -81,12 +98,13 @@ export default function ApplicationsPage() {
           style={{ marginBottom: '1rem' }}
           onSubmit={(e) => {
             e.preventDefault()
-            setPage(1)
-            setQuery(search.trim())
+            setView((v) => withSearch(v, search))
           }}
         >
           <div className="field" style={{ margin: 0, flex: 1 }}>
             <input
+              id="app-search"
+              aria-label="Search applications"
               placeholder="Search by name, business, email, code, NIC or registration number"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -97,61 +115,59 @@ export default function ApplicationsPage() {
           </button>
         </form>
 
-        {error && <div className="alert error">{error}</div>}
-
-        {loading ? (
-          <p className="muted">Loading…</p>
-        ) : items.length === 0 ? (
-          <p className="muted">No applications found.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Reference</th>
-                <th>Business</th>
-                <th>Applicant</th>
-                <th>Submitted</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((a) => (
-                <tr key={a.id}>
-                  <td className="mono">{a.code}</td>
-                  <td>
-                    <strong>{a.businessName}</strong>
-                    <div className="muted small">{a.businessRegistrationNo}</div>
-                  </td>
-                  <td>
-                    {a.fullName}
-                    <div className="muted small">{a.email}</div>
-                  </td>
-                  <td className="small">{new Date(a.submittedAt).toLocaleString()}</td>
-                  <td>
-                    <span className={`badge ${a.status}`}>{a.status === 'ACTIVE' ? 'APPROVED' : a.status}</span>
-                  </td>
-                  <td>
-                    <Link href={`/admin/reseller-applications/${a.id}`}>{a.status === 'PENDING' ? 'Review' : 'View'}</Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {error && (
+          <div className="alert error" role="alert">
+            {error}{' '}
+            <button className="btn secondary small" onClick={load} disabled={loading}>
+              Retry
+            </button>
+          </div>
         )}
 
-        {meta.totalPages > 1 && (
-          <div className="row" style={{ marginTop: '1rem' }}>
-            <span className="muted small">
-              Page {page} of {meta.totalPages} · {meta.total} applications
-            </span>
-            <span className="spacer" />
-            <button className="btn secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-              Previous
-            </button>
-            <button className="btn secondary" disabled={page >= meta.totalPages} onClick={() => setPage((p) => p + 1)}>
-              Next
-            </button>
+        {!items ? (
+          error ? null : <p className="muted">Loading…</p>
+        ) : items.length === 0 ? (
+          <EmptyState
+            title="No applications found"
+            hint={view.query || view.status !== 'PENDING' ? 'No applications match the current filters.' : 'There are no applications waiting for review.'}
+          />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Reference</th>
+                  <th>Business</th>
+                  <th>Applicant</th>
+                  <th>Submitted</th>
+                  <th>Status</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((a) => (
+                  <tr key={a.id}>
+                    <td className="mono">{a.code}</td>
+                    <td>
+                      <strong>{a.businessName}</strong>
+                      <div className="muted small">{a.businessRegistrationNo}</div>
+                    </td>
+                    <td>
+                      {a.fullName}
+                      <div className="muted small">{a.email}</div>
+                    </td>
+                    <td className="small">{formatDate(a.submittedAt)}</td>
+                    <td>
+                      <span className={`badge ${a.status}`}>{a.status === 'ACTIVE' ? 'APPROVED' : a.status}</span>
+                    </td>
+                    <td>
+                      <Link href={`/admin/reseller-applications/${a.id}`}>{a.status === 'PENDING' ? 'Review' : 'View'}</Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <Pagination meta={meta} onPage={(p) => setView((v) => withPage(v, p))} noun="applications" busy={loading} />
           </div>
         )}
       </div>

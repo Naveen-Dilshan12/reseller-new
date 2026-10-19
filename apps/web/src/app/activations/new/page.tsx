@@ -1,21 +1,27 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { api, ApiError } from '@/lib/api'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { api, apiRequest, ApiError } from '@/lib/api'
 import { currentPeriod, formatMoney, monthLabel } from '@/lib/format'
 import { ACTIVATION_STATUS_LABELS, type ActivationListItem, type PaymentInfo } from '@/lib/activation-types'
+import type { ResellerProduct } from '@/lib/product-types'
 import { ResellerShell } from '@/components/ResellerShell'
+import { PageHero } from '@/components/PageHero'
+import { PaymentAccountNotice } from '@/components/activations/PaymentAccountNotice'
 
 interface CustomerOption {
   id: string
+  customerCode?: string | null
   displayName: string
   accounts: {
     id: string
     status: string
     externalTenantId: string | null
     product: { id: string; code: string; name: string; monthlyPrice: string; currency: string }
+    trialRequests?: { id: string; status: string; errorMessage?: string | null; createdAt: string }[]
+    activationRequests?: { id: string; reference: string; status: string; submittedAt: string }[]
   }[]
 }
 
@@ -34,11 +40,19 @@ function todayIso() {
 
 function NewActivationForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const initialCustomerId = searchParams.get('customerId') || ''
+  const initialProductId = searchParams.get('productId') || ''
+
   const [customers, setCustomers] = useState<CustomerOption[] | null>(null)
+  const [products, setProducts] = useState<ResellerProduct[] | null>(null)
   const [info, setInfo] = useState<PaymentInfo | null>(null)
   const [openRequests, setOpenRequests] = useState<ActivationListItem[]>([])
-  const [customerId, setCustomerId] = useState('')
-  const [productId, setProductId] = useState('')
+
+  const [customerId, setCustomerId] = useState(initialCustomerId)
+  const [customerSearch, setCustomerSearch] = useState('')
+
+  const [productId, setProductId] = useState(initialProductId)
   const [periodMonth, setPeriodMonth] = useState(currentPeriod())
   const [payerName, setPayerName] = useState('')
   const [payerBank, setPayerBank] = useState('')
@@ -52,24 +66,75 @@ function NewActivationForm() {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    api<CustomerOption[]>('/customers?limit=100').then(setCustomers).catch(() => setCustomers([]))
-    api<PaymentInfo>('/activation-requests/payment-info').then(setInfo).catch(() => setInfo(null))
+    api<CustomerOption[]>('/customers?limit=100')
+      .then((data) => {
+        setCustomers(data)
+        if (initialCustomerId) {
+          const match = data.find((c) => c.id === initialCustomerId)
+          if (match) {
+            setCustomerId(match.id)
+            if (match.customerCode) setCustomerSearch(match.customerCode)
+            if (!payerName) setPayerName(match.displayName)
+          }
+        }
+      })
+      .catch(() => setCustomers([]))
+
+    api<ResellerProduct[]>('/products')
+      .then((prods) => {
+        setProducts(prods)
+        if (initialProductId) {
+          const prodMatch = prods.find((p) => p.id === initialProductId)
+          if (prodMatch) setProductId(prodMatch.id)
+        }
+      })
+      .catch(() => setProducts([]))
+
+    api<PaymentInfo>('/activation-requests/payment-info')
+      .then(setInfo)
+      .catch(() => setInfo(null))
+
     api<ActivationListItem[]>('/activation-requests?status=PENDING_REVIEW,UNDER_REVIEW,APPROVED&limit=100')
       .then(setOpenRequests)
       .catch(() => setOpenRequests([]))
-  }, [])
+  }, [initialCustomerId, initialProductId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filteredCustomers = useMemo(() => {
+    if (!customers) return []
+    const term = customerSearch.trim().toLowerCase()
+    if (!term) return customers
+    return customers.filter(
+      (c) =>
+        c.displayName.toLowerCase().includes(term) ||
+        (c.customerCode && c.customerCode.toLowerCase().includes(term)) ||
+        c.id.toLowerCase().includes(term),
+    )
+  }, [customers, customerSearch])
 
   const customer = customers?.find((c) => c.id === customerId)
+  const selectedProduct = products?.find((p) => p.id === productId)
   const account = customer?.accounts.find((a) => a.product.id === productId)
   const months = useMemo(() => [-1, 0, 1, 2].map((d) => shiftMonth(currentPeriod(), d)), [])
-  const duplicate = account && openRequests.find((r) => r.customerAccount.id === account.id && r.periodMonth === periodMonth)
+
+  const duplicate =
+    selectedProduct &&
+    openRequests.find(
+      (r) =>
+        r.customerAccount?.customer?.id === (customer?.id || '') &&
+        r.product?.id === selectedProduct.id &&
+        r.periodMonth === periodMonth,
+    )
 
   const selectCustomer = (id: string) => {
     setCustomerId(id)
+    setProductId('')
     const c = customers?.find((x) => x.id === id)
-    const eligible = c?.accounts.filter((a) => a.externalTenantId) ?? []
-    setProductId(eligible.length === 1 ? eligible[0].product.id : '')
-    if (c && !payerName) setPayerName(c.displayName)
+    if (c) {
+      setPayerName(c.displayName)
+      if (c.customerCode) setCustomerSearch(c.customerCode)
+    } else {
+      setPayerName('')
+    }
   }
 
   const pickFile = (f: File | null) => {
@@ -89,7 +154,7 @@ function NewActivationForm() {
   const validate = () => {
     const v: Record<string, string> = {}
     if (!customerId) v.customerId = 'Select a customer'
-    if (!productId) v.productId = 'Select a product'
+    if (!productId) v.productId = 'Select a SaaS product'
     if (payerName.trim().length < 2) v.payerName = 'Enter the name on the bank transfer'
     if (transactionRef.trim().length < 3) v.transactionRef = 'Enter the bank transaction / reference number'
     if (!transferDate) v.transferDate = 'Enter the transfer date'
@@ -103,19 +168,41 @@ function NewActivationForm() {
     const v = validate()
     setErrors(v)
     setFormError(null)
-    if (Object.keys(v).length || !account || !file) return
+    if (Object.keys(v).length || !selectedProduct || !file) return
+
+    if (!account || !account.externalTenantId) {
+      setFormError('The customer must have a provisioned SaaS account before a paid activation can be submitted.')
+      return
+    }
+
+    if (account.status === 'ACTIVE') {
+      setFormError('This customer already has an active paid subscription for this product.')
+      return
+    }
+
+    const hasOpenRequest = openRequests.some(
+      (r) =>
+        r.customerAccount?.id === account.id ||
+        (r.customerAccount?.customer?.id === customerId && r.product?.id === productId),
+    )
+    if (hasOpenRequest) {
+      setFormError('An activation request is already pending review for this customer account.')
+      return
+    }
+
+    setBusy(true)
     const form = new FormData()
     form.set('customerId', customerId)
     form.set('productId', productId)
     form.set('periodMonth', periodMonth)
-    form.set('amount', String(account.product.monthlyPrice))
+    form.set('amount', String(selectedProduct.monthlyPrice))
     form.set('payerName', payerName.trim())
     if (payerBank.trim()) form.set('payerBank', payerBank.trim())
     form.set('transactionRef', transactionRef.trim())
     form.set('transferDate', transferDate)
     if (notes.trim()) form.set('notes', notes.trim())
     form.set('slip', file)
-    setBusy(true)
+
     try {
       const created = await api<{ id: string; reference: string }>('/activation-requests', { method: 'POST', body: form })
       router.push(`/activations/${created.id}?submitted=1`)
@@ -123,92 +210,363 @@ function NewActivationForm() {
       if (err instanceof ApiError) {
         setErrors(err.fieldErrors())
         setFormError(err.message)
-      } else setFormError('Could not submit the activation request')
+      } else {
+        setFormError('Could not submit the activation request')
+      }
       setBusy(false)
     }
   }
 
-  if (!customers) return <p className="muted">Loading…</p>
+  if (!customers || !products) return <p className="muted">Loading…</p>
+
+  const isCustomerSelected = Boolean(customerId)
 
   return (
     <>
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>1. Customer</h2>
-        {customers.length === 0 ? (
-          <p className="muted">
-            You have no customers yet. <Link href="/trials/new">Create a trial account</Link> first.
-          </p>
-        ) : (
-          <div className="field">
-            <label htmlFor="na-customer">Customer</label>
-            <select id="na-customer" value={customerId} onChange={(e) => selectCustomer(e.target.value)}>
-              <option value="">Select a customer…</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.displayName}
-                </option>
-              ))}
-            </select>
-            {errors.customerId && <span className="error-text">{errors.customerId}</span>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '1.25rem' }}>
+          <span
+            style={{
+              width: '26px',
+              height: '26px',
+              borderRadius: '7px',
+              background: 'rgba(37, 99, 235, 0.16)',
+              border: '1px solid rgba(59, 130, 246, 0.35)',
+              color: 'var(--primary-light)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 700,
+              fontSize: '0.82rem',
+            }}
+          >
+            1
+          </span>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-heading)' }}>
+            Customer Search &amp; Selection
+          </h2>
+        </div>
+
+        <div className="form-grid-2">
+        {/* Customer ID Search Input */}
+        <div className="field">
+          <label htmlFor="customer-search-input">Search by Customer ID or Shop Name</label>
+          <input
+            id="customer-search-input"
+            type="text"
+            placeholder="e.g. CUS-000001 or Acme Store…"
+            value={customerSearch}
+            onChange={(e) => {
+              const val = e.target.value
+              setCustomerSearch(val)
+              const exact = customers?.find((c) => c.customerCode?.toLowerCase() === val.trim().toLowerCase())
+              if (exact) selectCustomer(exact.id)
+            }}
+            style={{ width: '100%' }}
+          />
+          <span className="hint">Search by unique Customer ID (e.g. CUS-000001) or business display name</span>
+        </div>
+
+        {/* Customer Dropdown (Filtered) */}
+        <div className="field">
+          <label htmlFor="na-customer">Authorized Customer</label>
+          <select
+            id="na-customer"
+            value={customerId}
+            onChange={(e) => selectCustomer(e.target.value)}
+          >
+            <option value="">Choose a customer…</option>
+            {filteredCustomers.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.customerCode ? `[${c.customerCode}] ` : ''}{c.displayName} ({c.accounts.length} {c.accounts.length === 1 ? 'account' : 'accounts'})
+              </option>
+            ))}
+          </select>
+          {errors.customerId && <span className="error-text">{errors.customerId}</span>}
+        </div>
+        </div>
+
+        {/* Selected Customer Profile & Associated Accounts Card */}
+        {customer && (
+          <div
+            style={{
+              marginTop: '1.25rem',
+              padding: '1.1rem',
+              borderRadius: '8px',
+              background: 'var(--surface-hover)',
+              border: '1px solid var(--border)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.75rem',
+            }}
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.85rem' }}>
+              <div>
+                <span className="muted small">Customer ID</span>
+                <div className="mono" style={{ fontWeight: 700, color: 'var(--primary-light)', fontSize: '1rem' }}>
+                  {customer.customerCode || customer.id}
+                </div>
+              </div>
+              <div>
+                <span className="muted small">Shop / Business Name</span>
+                <div style={{ fontWeight: 700, color: 'var(--text-heading)', fontSize: '1rem' }}>
+                  {customer.displayName}
+                </div>
+              </div>
+              <div>
+                <span className="muted small">Linked Product Accounts</span>
+                <div style={{ fontWeight: 600, color: 'var(--text)' }}>
+                  {customer.accounts.length} {customer.accounts.length === 1 ? 'Product Account' : 'Product Accounts'}
+                </div>
+              </div>
+            </div>
+
+            {/* Associated Product Accounts List */}
+            {customer.accounts.length > 0 && (
+              <div style={{ marginTop: '0.35rem', borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+                <span className="muted small" style={{ fontWeight: 600, display: 'block', marginBottom: '0.4rem' }}>
+                  Associated SaaS Product Accounts:
+                </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  {customer.accounts.map((acc) => {
+                    const latestActivation = acc.activationRequests?.[0]
+                    const hasPendingReview = latestActivation && ['PENDING_REVIEW', 'UNDER_REVIEW', 'APPROVED'].includes(latestActivation.status)
+
+                    return (
+                      <div
+                        key={acc.id}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          fontSize: '0.85rem',
+                          padding: '0.45rem 0.65rem',
+                          background: 'var(--surface)',
+                          borderRadius: '6px',
+                          border: '1px solid var(--border)',
+                          flexWrap: 'wrap',
+                          gap: '0.5rem',
+                        }}
+                      >
+                        <div>
+                          <strong>{acc.product.name}</strong>
+                          <span className="muted small mono" style={{ marginLeft: '0.35rem' }}>({acc.product.code})</span>
+                          {acc.externalTenantId ? (
+                            <span className="muted small mono" style={{ marginLeft: '0.5rem', color: 'var(--primary-light)' }}>
+                              Tenant: {acc.externalTenantId}
+                            </span>
+                          ) : (
+                            <span className="muted small" style={{ marginLeft: '0.5rem', color: 'var(--muted)' }}>
+                              (Pending Tenant Provisioning)
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                          <span className={`badge sub-${acc.status}`}>
+                            {acc.status}
+                          </span>
+                          {hasPendingReview && (
+                            <span className="badge sub-PENDING" title={`Activation ${latestActivation.reference} under review`}>
+                              {latestActivation.reference} In Review
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
+
+        <div style={{ marginTop: '0.65rem' }}>
+          <span className="hint">
+            Have a new prospect?{' '}
+            <Link href="/demo-requests/new" style={{ color: 'var(--primary-light)', textDecoration: 'underline' }}>
+              Request a Demo
+            </Link>
+          </span>
+        </div>
       </div>
 
-      {customer && (
+      {isCustomerSelected && (
         <div className="card">
-          <h2 style={{ marginTop: 0 }}>2. SaaS product</h2>
-          {customer.accounts.length === 0 ? (
-            <p className="muted">This customer has no SaaS account yet. Create a trial first.</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '1.25rem' }}>
+            <span
+              style={{
+                width: '26px',
+                height: '26px',
+                borderRadius: '7px',
+                background: 'rgba(37, 99, 235, 0.16)',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                color: 'var(--primary-light)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                fontSize: '0.82rem',
+              }}
+            >
+              2
+            </span>
+            <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-heading)' }}>
+              SaaS Product Selection
+            </h2>
+          </div>
+
+          {customer && customer.accounts.length === 0 && (
+            <div className="alert info" style={{ marginBottom: '1.25rem' }}>
+              <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                SaaS Account Setup Required
+              </div>
+              <p style={{ margin: '0.35rem 0 0', fontSize: '0.86rem', lineHeight: 1.5 }}>
+                This customer has no SaaS account yet. Once a demo request for them is confirmed, they appear here as a trial customer you can activate.
+              </p>
+            </div>
+          )}
+
+          {customer && customer.accounts.length > 0 && !customer.accounts.some((a) => Boolean(a.externalTenantId)) && (
+            <div className="alert warning" style={{ marginBottom: '1.25rem' }}>
+              <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                SaaS Tenant Provisioning Incomplete
+              </div>
+              <p style={{ margin: '0.35rem 0 0', fontSize: '0.86rem', lineHeight: 1.5 }}>
+                This customer&apos;s SaaS tenant is still being provisioned. A paid activation can be submitted once it is ready.
+              </p>
+            </div>
+          )}
+
+          {products.length === 0 ? (
+            <p className="muted">No products are currently available for your account.</p>
           ) : (
             <div className="product-grid">
-              {customer.accounts.map((a) => {
-                const ready = Boolean(a.externalTenantId) && a.status !== 'CANCELLED'
+              {products.map((p) => {
+                const acc = customer?.accounts.find((a) => a.product.id === p.id)
+                const hasTenant = Boolean(acc?.externalTenantId)
+                const isSelectable = hasTenant && acc?.status !== 'CANCELLED'
+
+                if (isSelectable) {
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`card product-card selectable ${productId === p.id ? 'selected' : ''}`}
+                      aria-pressed={productId === p.id}
+                      onClick={() => setProductId(p.id)}
+                    >
+                      <h3>{p.name}</h3>
+                      <div className="price">
+                        {formatMoney(p.monthlyPrice, p.currency)} <span className="muted small">/ month</span>
+                      </div>
+                      <div className="small" style={{ marginTop: '0.35rem' }}>
+                        <span className={`badge sub-${acc?.status || 'TRIAL'}`}>
+                          {acc?.status === 'ACTIVE' ? 'Active Paid Tenant' : 'Trial Account'}
+                        </span>
+                        <span className="mono muted" style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.72rem' }}>
+                          Tenant: {acc?.externalTenantId}
+                        </span>
+                      </div>
+                    </button>
+                  )
+                }
+
                 return (
-                  <button
-                    key={a.id}
-                    type="button"
-                    className={`card product-card selectable ${productId === a.product.id ? 'selected' : ''}`}
-                    disabled={!ready}
-                    aria-pressed={productId === a.product.id}
-                    onClick={() => setProductId(a.product.id)}
+                  <div
+                    key={p.id}
+                    className="card product-card"
+                    style={{
+                      opacity: 0.65,
+                      borderStyle: 'dashed',
+                      cursor: 'not-allowed',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                    }}
                   >
-                    <h3>{a.product.name}</h3>
-                    <div className="price">
-                      {formatMoney(a.product.monthlyPrice, a.product.currency)} <span className="muted small">/ month</span>
+                    <div>
+                      <h3>{p.name}</h3>
+                      <div className="price">
+                        {formatMoney(p.monthlyPrice, p.currency)} <span className="muted small">/ month</span>
+                      </div>
                     </div>
-                    <div className="small">
-                      <span className={`badge sub-${a.status}`}>{a.status}</span>{' '}
-                      {!a.externalTenantId ? 'SaaS account not created yet' : a.status === 'CANCELLED' ? 'Account cancelled' : ''}
+                    <div className="small" style={{ marginTop: '0.5rem' }}>
+                      {!acc ? (
+                        <>
+                          <span
+                            className="badge"
+                            style={{
+                              background: 'var(--surface-hover)',
+                              color: 'var(--muted)',
+                              border: '1px solid var(--border)',
+                            }}
+                          >
+                            No Account
+                          </span>
+                        </>
+                      ) : !acc.externalTenantId ? (
+                        <>
+                          <span className="badge sub-PENDING">Tenant Pending</span>
+                          <span className="muted small" style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.72rem' }}>
+                            Provisioning in progress
+                          </span>
+                        </>
+                      ) : (
+                        <span className="badge sub-CANCELLED">Cancelled</span>
+                      )}
                     </div>
-                  </button>
+                  </div>
                 )
               })}
             </div>
           )}
-          {errors.productId && <div className="error-text">{errors.productId}</div>}
+          {errors.productId && <div className="error-text" style={{ marginTop: '0.5rem' }}>{errors.productId}</div>}
         </div>
       )}
 
-      {account && (
+      {selectedProduct && (
         <>
           <div className="card">
-            <h2 style={{ marginTop: 0 }}>3. Payment details</h2>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '1.25rem' }}>
+              <span
+                style={{
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '7px',
+                  background: 'rgba(37, 99, 235, 0.16)',
+                  border: '1px solid rgba(59, 130, 246, 0.35)',
+                  color: 'var(--primary-light)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: '0.82rem',
+                }}
+              >
+                3
+              </span>
+              <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-heading)' }}>
+                Payment &amp; Transfer Details
+              </h2>
+            </div>
             <div className="alert info">
               <div>
-                Amount to pay: <strong>{formatMoney(account.product.monthlyPrice, account.product.currency)}</strong> for one month of{' '}
-                {account.product.name}.
+                Amount to pay: <strong>{formatMoney(selectedProduct.monthlyPrice, selectedProduct.currency)}</strong> for one month of{' '}
+                {selectedProduct.name}.
               </div>
-              {info?.companyBankDetails ? (
-                <div className="pre-line" style={{ marginTop: '0.5rem' }}>
-                  <strong>Pay only into the Hexalyte company account:</strong>
-                  <br />
-                  {info.companyBankDetails}
-                </div>
-              ) : (
-                <div style={{ marginTop: '0.5rem' }}>Pay only into the official Hexalyte company bank account.</div>
-              )}
+              <PaymentAccountNotice companyBankDetails={info?.companyBankDetails} />
             </div>
-            <div className="grid-2">
+            <div className="form-grid" style={{ marginTop: '1rem' }}>
               <div className="field">
                 <label htmlFor="na-period">Subscription month</label>
                 <select id="na-period" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)}>
@@ -222,7 +580,7 @@ function NewActivationForm() {
               </div>
               <div className="field">
                 <label>Amount paid</label>
-                <input value={formatMoney(account.product.monthlyPrice, account.product.currency)} readOnly />
+                <input value={formatMoney(selectedProduct.monthlyPrice, selectedProduct.currency)} readOnly />
                 <span className="hint">The monthly fee is fixed. Contact Hexalyte if the customer paid a different amount.</span>
                 {errors.amount && <span className="error-text">{errors.amount}</span>}
               </div>
@@ -245,28 +603,53 @@ function NewActivationForm() {
                 <input id="na-date" type="date" max={todayIso()} value={transferDate} onChange={(e) => setTransferDate(e.target.value)} />
                 {errors.transferDate && <span className="error-text">{errors.transferDate}</span>}
               </div>
-            </div>
-            <div className="field">
-              <label htmlFor="na-notes">Notes for Hexalyte (optional)</label>
-              <textarea id="na-notes" rows={2} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
+              <div className="field span-all">
+                <label htmlFor="na-notes">Notes for Hexalyte (optional)</label>
+                <textarea id="na-notes" rows={2} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
+              </div>
             </div>
           </div>
 
           <div className="card">
-            <h2 style={{ marginTop: 0 }}>4. Bank slip</h2>
-            <div className="field">
-              <label htmlFor="na-slip">Bank slip or transfer receipt</label>
-              <input id="na-slip" type="file" accept={ACCEPT} onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
-              <span className="hint">
-                JPG, PNG, WEBP or PDF, up to {info?.maxUploadMb ?? 5} MB. Stored privately and only visible to you and Hexalyte finance.
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '1.25rem' }}>
+              <span
+                style={{
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '7px',
+                  background: 'rgba(37, 99, 235, 0.16)',
+                  border: '1px solid rgba(59, 130, 246, 0.35)',
+                  color: 'var(--primary-light)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: '0.82rem',
+                }}
+              >
+                4
               </span>
-              {errors.slip && <span className="error-text">{errors.slip}</span>}
+              <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-heading)' }}>
+                Bank Deposit Slip Verification
+              </h2>
             </div>
-            <label className="checkbox">
-              <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-              The customer has paid this amount into the Hexalyte company bank account and the slip is genuine.
-            </label>
-            {errors.confirmed && <div className="error-text">{errors.confirmed}</div>}
+            <div className="form-grid-2">
+              <div className="field">
+                <label htmlFor="na-slip">Bank slip or transfer receipt</label>
+                <input id="na-slip" type="file" accept={ACCEPT} onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
+                <span className="hint">
+                  JPG, PNG, WEBP or PDF, up to {info?.maxUploadMb ?? 5} MB. Stored privately and only visible to you and Hexalyte finance.
+                </span>
+                {errors.slip && <span className="error-text">{errors.slip}</span>}
+              </div>
+              <div>
+                <label className="checkbox" style={{ marginTop: '1.6rem' }}>
+                  <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+                  The customer has paid this amount into the Hexalyte company bank account and the slip is genuine.
+                </label>
+                {errors.confirmed && <div className="error-text">{errors.confirmed}</div>}
+              </div>
+            </div>
           </div>
         </>
       )}
@@ -278,11 +661,33 @@ function NewActivationForm() {
         </div>
       )}
       {formError && <div className="alert error">{formError}</div>}
-      <div className="row">
-        <span className="small muted">Hexalyte reviews the payment and activates the subscription. You will be notified of the result.</span>
-        <span className="spacer" />
-        <button className="btn" onClick={submit} disabled={busy || !account || Boolean(duplicate)}>
-          {busy ? 'Submitting…' : 'Submit activation request'}
+      <div
+        className="card"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '1rem',
+          padding: '1.25rem 1.5rem',
+          marginTop: '0.5rem',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--muted)', fontSize: '0.84rem' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          <span>Hexalyte reviews the payment slip and activates the SaaS subscription upon verification.</span>
+        </div>
+        <button
+          className="btn"
+          onClick={submit}
+          disabled={busy || !selectedProduct || !customerId || !account?.externalTenantId || Boolean(duplicate)}
+          style={{ minWidth: '220px', fontWeight: 700 }}
+        >
+          {busy ? 'Submitting Request…' : 'Submit Activation Request'}
         </button>
       </div>
     </>
@@ -294,11 +699,37 @@ export default function NewActivationPage() {
     <ResellerShell>
       {() => (
         <main className="container">
-          <Link href="/activations" className="small">
-            ← Paid activations
-          </Link>
-          <h1>New activation request</h1>
-          <NewActivationForm />
+          {/* ── Compact Scenic Hero Banner (No KPIs on Creation Form Flow) ── */}
+          <PageHero
+            tag="REVENUE OPERATIONS"
+            title="New Activation Request"
+            subtitle="Submit customer payment details and bank transfer slip for verification and SaaS provisioning."
+            icon={
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+                <line x1="12" y1="8" x2="12" y2="14" />
+                <line x1="9" y1="11" x2="15" y2="11" />
+              </svg>
+            }
+            actions={
+              <Link
+                href="/activations"
+                className="btn secondary small"
+                style={{ display: 'inline-flex', gap: '0.45rem', alignItems: 'center', fontWeight: 600 }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <line x1="19" y1="12" x2="5" y2="12" />
+                  <polyline points="12 19 5 12 12 5" />
+                </svg>
+                <span>Back to Paid Activations</span>
+              </Link>
+            }
+          />
+
+          {/* ── Full-width form layout (same structure as Commissions & Payouts) ── */}
+          <Suspense fallback={<p className="muted">Loading activation form…</p>}>
+            <NewActivationForm />
+          </Suspense>
         </main>
       )}
     </ResellerShell>

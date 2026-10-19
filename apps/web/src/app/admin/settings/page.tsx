@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { api, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
+import { AppearanceSettings } from '@/components/admin/AppearanceSettings'
+import { SmsGatewaySettings } from '@/components/admin/SmsGatewaySettings'
 
 interface Level {
   level: number
@@ -64,7 +66,7 @@ export default function SettingsPage() {
     setBankError(null)
     if (bankValue.trim().length < 10) return setBankError('Enter the full bank details.')
     if (bankReason.trim().length < 5) return setBankError('Give a reason for the change.')
-    if (!confirm('Resellers will immediately tell customers to pay into this account. Save the new bank details?')) return
+    if (!confirm('Partners will immediately tell customers to pay into this account. Save the new bank details?')) return
     setBusy(true)
     try {
       setData(await api<Settings>('/admin/settings/company-bank-details', { method: 'PUT', body: JSON.stringify({ value: bankValue.trim(), reason: bankReason.trim() }) }))
@@ -90,7 +92,7 @@ export default function SettingsPage() {
   const saveLevels = async () => {
     setLevelErrors([])
     if (levelReason.trim().length < 5) return setLevelErrors(['Give a reason for the change.'])
-    if (!confirm('Reseller levels will be recalculated now. New commissions use the new rates; existing commissions are not changed. Continue?')) return
+    if (!confirm('Partner levels will be recalculated now. New commissions use the new rates; existing commissions are not changed. Continue?')) return
     setBusy(true)
     try {
       const body = {
@@ -106,7 +108,7 @@ export default function SettingsPage() {
       const res = await api<Settings & { levelChanges: number }>('/admin/settings/commission-levels', { method: 'PUT', body: JSON.stringify(body) })
       setData(res)
       setEditingLevels(false)
-      setMessage(`Commission levels updated. ${res.levelChanges} reseller level(s) changed.`)
+      setMessage(`Commission levels updated. ${res.levelChanges} partner level(s) changed.`)
     } catch (err) {
       setLevelErrors(err instanceof ApiError ? (err.errors.length ? err.errors : [err.message]) : ['Save failed'])
     } finally {
@@ -133,7 +135,7 @@ export default function SettingsPage() {
   return (
     <main className="container">
       <h1>Settings</h1>
-      {!canManage && <p className="muted">Read-only. Only a Super Admin can change settings.</p>}
+      {!canManage && <p className="muted">Read-only. Only an Admin can change settings.</p>}
       {message && <div className="alert success">{message}</div>}
 
       <section className="card">
@@ -154,12 +156,16 @@ export default function SettingsPage() {
             </button>
           )}
         </div>
-        <p className="small muted">Shown to resellers on the activation request form. Customers pay subscription fees into this account.</p>
+        <p className="small muted">
+          Shown to partners on the activation request form and on their Our Bank Details page. Customers pay subscription fees into this
+          account. Write one <strong>Label: value</strong> line each for Bank Name, Account Holder, Account Number and Branch so partners
+          get a separate copy button for every detail; any other lines are shown as they are.
+        </p>
         {editingBank ? (
           <>
             <div className="field">
               <label htmlFor="bank-value">Bank details</label>
-              <textarea id="bank-value" rows={4} maxLength={1000} value={bankValue} onChange={(e) => setBankValue(e.target.value)} placeholder={'Hexalyte (Pvt) Ltd\nBank of Ceylon – Colombo Fort\nA/C 0000000000'} />
+              <textarea id="bank-value" rows={4} maxLength={1000} value={bankValue} onChange={(e) => setBankValue(e.target.value)} placeholder={'Bank Name: Bank of Ceylon\nAccount Holder: Hexalyte (Pvt) Ltd\nAccount Number: 0000000000\nBranch: Colombo Fort'} />
             </div>
             <div className="field">
               <label htmlFor="bank-reason">Reason for change (audited)</label>
@@ -186,7 +192,7 @@ export default function SettingsPage() {
             </p>
           </>
         ) : (
-          <div className="alert warning">Not set. Resellers are told to pay into the official Hexalyte account without details.</div>
+          <div className="alert warning">Not set. Partners are told to pay into the official Hexalyte account without details.</div>
         )}
       </section>
 
@@ -209,8 +215,14 @@ export default function SettingsPage() {
           )}
         </div>
         <p className="small muted">
-          A reseller&apos;s level depends on their number of active subscriptions. Changing tiers recalculates every reseller&apos;s
+          A partner&apos;s level depends on their number of active subscriptions. Changing tiers recalculates every partner&apos;s
           level; commissions already created keep their original rate.
+        </p>
+        <p className="small muted">
+          <strong>Commission %</strong> is the share of a product&apos;s monthly subscription price that the partner earns; the rest stays
+          with Hexalyte. Partners see their level, badge, progress and commission split from these values. Level 1–5 each have their own
+          badge style (Bronze, Silver, Gold, Platinum, Diamond); any level above 5 reuses the Diamond badge. Only an Admin can change
+          these settings.
         </p>
         <div className="table-wrap">
           <table>
@@ -291,6 +303,10 @@ export default function SettingsPage() {
           </>
         )}
       </section>
+
+      <AppearanceSettings canManage={canManage} />
+
+      <SmsGatewaySettings canManage={canManage} />
 
       <div className="grid-2 gap">
         <section className="card">

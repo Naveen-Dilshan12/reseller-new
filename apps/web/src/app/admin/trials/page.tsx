@@ -1,20 +1,10 @@
-'use client'
+import { redirect } from 'next/navigation'
 
-import { useAdminUser } from '@/lib/admin-context'
-import { TrialList } from '@/components/trials/TrialList'
-
-export default function AdminTrialsPage() {
-  const admin = useAdminUser()
-  return (
-    <main className="container">
-      <h1>Trial requests</h1>
-      <p className="muted">
-        Trials created by resellers through each SaaS&apos;s partner API. Failures caused by the integration (credentials,
-        missing endpoint) are also sent to admins as notifications; see the product&apos;s integration log for details.
-      </p>
-      <div className="card">
-        <TrialList showReseller canAct={admin.permissions.includes('trials:create')} />
-      </div>
-    </main>
-  )
+/**
+ * The Admin "Trial requests" list is replaced by Demo Requests (review → welcome message →
+ * confirmation). Kept as a redirect so existing links (dashboard cards, bookmarks) still land
+ * somewhere useful. The backend /trials API and the shared trial-account logic are untouched.
+ */
+export default function AdminTrialsRedirectPage() {
+  redirect('/admin/demo-requests')
 }

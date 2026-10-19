@@ -2,7 +2,8 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api, apiRequest, ApiError } from '@/lib/api'
-import { humanizeAction, type AuditLogEntry } from '@/lib/admin-types'
+import { humanizeAction, partnerWording, type AuditLogEntry } from '@/lib/admin-types'
+import { AdminPageHeader } from '@/components/admin/AdminPageHeader'
 
 interface Facets {
   actions: { value: string; count: number }[]
@@ -11,6 +12,7 @@ interface Facets {
 
 export default function AuditLogsPage() {
   const [facets, setFacets] = useState<Facets | null>(null)
+  const [facetsFailed, setFacetsFailed] = useState(false)
   const [action, setAction] = useState('')
   const [entityType, setEntityType] = useState('')
   const [actorType, setActorType] = useState('')
@@ -21,11 +23,19 @@ export default function AuditLogsPage() {
   const [items, setItems] = useState<AuditLogEntry[] | null>(null)
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 })
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    api<Facets>('/audit-logs/facets').then(setFacets).catch(() => setFacets({ actions: [], entityTypes: [] }))
+  const loadFacets = useCallback(() => {
+    setFacetsFailed(false)
+    api<Facets>('/audit-logs/facets')
+      .then(setFacets)
+      .catch(() => {
+        setFacets({ actions: [], entityTypes: [] })
+        setFacetsFailed(true)
+      })
   }, [])
+  useEffect(loadFacets, [loadFacets])
 
   const load = useCallback(() => {
     const params = new URLSearchParams({ page: String(page), limit: '50' })
@@ -35,13 +45,20 @@ export default function AuditLogsPage() {
     if (from) params.set('from', new Date(`${from}T00:00:00`).toISOString())
     if (to) params.set('to', new Date(`${to}T23:59:59.999`).toISOString())
     if (search.trim()) params.set('search', search.trim())
+    setLoading(true)
+    setError(null)
     apiRequest<AuditLogEntry[]>(`/audit-logs?${params}`)
       .then((r) => {
         setItems(r.data)
         setMeta({ total: r.meta?.total ?? 0, totalPages: r.meta?.totalPages || 1 })
-        setError(null)
+        setLoading(false)
       })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load the audit log'))
+      .catch((err) => {
+        setItems(null)
+        setMeta({ total: 0, totalPages: 1 })
+        setError(err instanceof ApiError ? err.message : 'Failed to load the audit log')
+        setLoading(false)
+      })
   }, [action, entityType, actorType, from, to, search, page])
 
   useEffect(load, [action, entityType, actorType, from, to, page]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -53,19 +70,18 @@ export default function AuditLogsPage() {
 
   return (
     <main className="container wide">
-      <h1>Audit logs</h1>
-      <p className="muted">
-        Every important action (approvals, rejections, activations, payment verification, bank slip and bank account
-        access, commission changes, settings changes, logins) is recorded here. The log is append-only: entries cannot be
-        edited or deleted.
-      </p>
+      <AdminPageHeader
+        title="Audit logs"
+        subtitle="Every important action (approvals, rejections, activations, payment verification, bank slip and bank account access, commission changes, settings changes, logins) is recorded here. The log is append-only: entries cannot be edited or deleted."
+      />
       <div className="card">
         <form
           className="filter-bar plain"
           onSubmit={(e) => {
             e.preventDefault()
-            setPage(1)
-            load()
+            // Changing the page reloads by itself; calling load() as well would also request the old page.
+            if (page !== 1) setPage(1)
+            else load()
           }}
         >
           <div className="field inline">
@@ -85,7 +101,7 @@ export default function AuditLogsPage() {
               <option value="">All</option>
               {facets?.entityTypes.map((t) => (
                 <option key={t.value} value={t.value}>
-                  {t.value}
+                  {partnerWording(t.value)}
                 </option>
               ))}
             </select>
@@ -116,9 +132,24 @@ export default function AuditLogsPage() {
           </button>
         </form>
 
-        {error && <div className="alert error">{error}</div>}
+        {facetsFailed && (
+          <div className="alert warning small">
+            Filter options could not be loaded; the Action and Record type lists are empty.{' '}
+            <button className="btn secondary small" onClick={loadFacets}>
+              Reload filter options
+            </button>
+          </div>
+        )}
+        {error && (
+          <div className="alert error">
+            {error}{' '}
+            <button className="btn secondary small" onClick={load} disabled={loading}>
+              Retry
+            </button>
+          </div>
+        )}
         {!items ? (
-          <p className="muted">Loading…</p>
+          error ? null : <p className="muted">Loading…</p>
         ) : items.length === 0 ? (
           <p className="muted">No entries match these filters.</p>
         ) : (
@@ -148,7 +179,7 @@ export default function AuditLogsPage() {
                         <div className="muted">{a.actorType.toLowerCase()}</div>
                       </td>
                       <td className="small">
-                        {a.entityType}
+                        {partnerWording(a.entityType)}
                         {a.entityId && <div className="muted mono">{a.entityId}</div>}
                       </td>
                       <td className="small mono">{a.ip ?? '—'}</td>
@@ -180,10 +211,10 @@ export default function AuditLogsPage() {
               Page {page} of {meta.totalPages} · {meta.total} entries
             </span>
             <span className="spacer" />
-            <button className="btn secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+            <button className="btn secondary" disabled={loading || page <= 1} onClick={() => setPage((p) => p - 1)}>
               Previous
             </button>
-            <button className="btn secondary" disabled={page >= meta.totalPages} onClick={() => setPage((p) => p + 1)}>
+            <button className="btn secondary" disabled={loading || page >= meta.totalPages} onClick={() => setPage((p) => p + 1)}>
               Next
             </button>
           </div>

@@ -1,482 +1,963 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { api, ApiError } from '@/lib/api'
 import type { CurrentUser } from '@/lib/auth'
-import { currentPeriod, formatDate, formatMoney, monthLabel } from '@/lib/format'
-import { ACTIVATION_STATUS_LABELS, type ActivationStatus } from '@/lib/activation-types'
-import { TRIAL_STATUS_LABELS, type TrialStatus } from '@/lib/trial-types'
-import type { CommissionStatus } from '@/lib/commission-types'
-import {
-  ACCOUNT_STATUS_LABELS,
-  COMMISSION_STATUS_LABELS,
-  type AccountStatus,
-  type ResellerDashboard,
-} from '@/lib/dashboard-types'
+import { formatDate, formatMoney } from '@/lib/format'
+import type { CommissionLevel } from '@/lib/commission-types'
+import type { ResellerDashboard } from '@/lib/dashboard-types'
 import { ResellerShell } from '@/components/ResellerShell'
+import { useLanguage } from '@/lib/i18n'
+import { useAppearance } from '@/lib/appearance'
+import { welcomeHeading } from '@/lib/appearance-utils'
+import { LevelBadge, LevelLadder } from '@/components/commissions/LevelBadge'
+import { recentLevelUp } from '@/components/commissions/LevelUpCelebration'
+import { usePartnerSummaryContext } from '@/components/commissions/PartnerSummaryContext'
 
-// ─── Date presets ────────────────────────────────────────────────────────────
+// ─── Localized Month & Date Helpers ──────────────────────────────────────────
 
-type Preset = 'all' | 'today' | '7d' | '30d' | 'month' | 'last-month' | 'year' | 'custom'
+const SI_MONTHS = ['ජන', 'පෙබ', 'මාර්', 'අප්‍රේ', 'මැයි', 'ජූනි', 'ජූලි', 'අගෝ', 'සැප්', 'ඔක්', 'නොවැ', 'දෙසැ']
 
-const PRESETS: { value: Preset; label: string }[] = [
-  { value: 'all', label: 'All time' },
-  { value: 'today', label: 'Today' },
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-  { value: 'month', label: 'This month' },
-  { value: 'last-month', label: 'Last month' },
-  { value: 'year', label: 'This year' },
-  { value: 'custom', label: 'Custom range' },
-]
-
-const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-
-function presetRange(preset: Preset): { from: string; to: string } {
+function getDefaultMonths(count = 6): string[] {
+  const months: string[] = []
   const now = new Date()
-  const today = iso(now)
-  const daysAgo = (n: number) => iso(new Date(now.getFullYear(), now.getMonth(), now.getDate() - n))
-  switch (preset) {
-    case 'today':
-      return { from: today, to: today }
-    case '7d':
-      return { from: daysAgo(6), to: today }
-    case '30d':
-      return { from: daysAgo(29), to: today }
-    case 'month':
-      return { from: iso(new Date(now.getFullYear(), now.getMonth(), 1)), to: today }
-    case 'last-month':
-      return { from: iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)), to: iso(new Date(now.getFullYear(), now.getMonth(), 0)) }
-    case 'year':
-      return { from: iso(new Date(now.getFullYear(), 0, 1)), to: today }
-    default:
-      return { from: '', to: '' }
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
   }
+  return months
 }
 
-// ─── Small building blocks ───────────────────────────────────────────────────
+function formatMonthLabel(monthStr: string, lang: 'en' | 'si'): string {
+  const parts = monthStr.split('-').map(Number)
+  if (parts.length < 2) return monthStr
+  const [, month] = parts
+  if (lang === 'si') {
+    return SI_MONTHS[month - 1] || monthStr
+  }
+  const date = new Date(Date.UTC(2026, month - 1, 1))
+  return date.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })
+}
 
-function Kpi({ label, value, hint, href, tone }: { label: string; value: React.ReactNode; hint?: React.ReactNode; href?: string; tone?: 'primary' | 'warning' }) {
-  const accent = tone === 'primary' ? 'linear-gradient(90deg, #4f46e5, #8b5cf6)' : tone === 'warning' ? '#f59e0b' : '#6366f1'
-  const body = (
-    <div
-      style={{
-        position: 'relative',
-        background: '#0f1523',
-        borderRadius: '16px',
-        padding: '1.35rem 1.45rem',
-        border: '1px solid rgba(255, 255, 255, 0.08)',
-        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.4)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.4rem',
-        overflow: 'hidden',
-        transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-      }}
-    >
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '3px', background: accent, boxShadow: tone === 'primary' ? '0 0 10px rgba(99, 102, 241, 0.5)' : undefined }} />
-      <div className="kpi-label" style={{ fontSize: '0.74rem', letterSpacing: '0.05em', color: '#94a3b8', fontWeight: 700 }}>{label}</div>
-      <div className="kpi-value" style={{ fontSize: '1.75rem', fontWeight: 800, color: tone === 'primary' ? '#a5b4fc' : '#ffffff', letterSpacing: '-0.02em' }}>{value}</div>
-      {hint && <div className="kpi-hint" style={{ fontSize: '0.78rem', color: '#64748b' }}>{hint}</div>}
+function formatDisplayDate(dateStr: string | null | undefined): string {
+  if (!dateStr) return '—'
+  const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function translateStatus(status: string, t: (k: string) => string): string {
+  const key = `status.${status}`
+  const translated = t(key)
+  return translated === key ? status.replace(/_/g, ' ') : translated
+}
+
+function getStatusPill(status: string, t: (k: string) => string) {
+  const s = (status || '').toUpperCase()
+  const label = translateStatus(status, t)
+  if (s === 'ACTIVE' || s === 'APPROVED' || s === 'COMPLETED') {
+    return <span className="dash-pill-emerald">{label}</span>
+  }
+  if (s.includes('PENDING') || s.includes('PROCESSING') || s.includes('SAAS') || s.includes('REVIEW')) {
+    return <span className="dash-pill-blue">{label}</span>
+  }
+  if (s === 'TRIAL') {
+    return <span className="dash-pill-amber">{label}</span>
+  }
+  return <span className="dash-pill-muted">{label}</span>
+}
+
+// ─── Primary KPI Card V2 Component ───────────────────────────────────────────
+
+function KpiCardV2({
+  label,
+  value,
+  sub,
+  href,
+  icon,
+  accent,
+}: {
+  label: string
+  value: React.ReactNode
+  sub: string
+  href?: string
+  icon: React.ReactNode
+  accent: 'blue' | 'emerald' | 'amber' | 'purple'
+}) {
+  const content = (
+    <div className={`kpi-card-v2 accent-${accent}`}>
+      <div className="kpi-card-v2-left">
+        <div className={`kpi-card-v2-icon ${accent}`}>{icon}</div>
+        <div className="kpi-card-v2-body">
+          <span className="kpi-card-v2-label">{label}</span>
+          <span className="kpi-card-v2-value">{value}</span>
+          <span className="kpi-card-v2-sub">{sub}</span>
+        </div>
+      </div>
+      <span className="kpi-card-v2-arrow" aria-hidden="true">&rsaquo;</span>
     </div>
   )
+
   return href ? (
-    <Link href={href} style={{ textDecoration: 'none' }} className="kpi-link">
-      {body}
+    <Link href={href} style={{ textDecoration: 'none', color: 'inherit' }}>
+      {content}
     </Link>
   ) : (
-    body
+    content
   )
 }
 
-function Panel<S extends string>({
-  title,
-  href,
-  status,
-  statuses,
-  onStatus,
-  children,
+// ─── Customer Growth Line Chart (SVG) ─────────────────────────────────────────
+
+function CustomerGrowthChart({
+  data,
+  lang,
+  t,
 }: {
-  title: string
-  href?: string
-  status: S | ''
-  statuses: Record<S, string>
-  onStatus: (s: S | '') => void
-  children: React.ReactNode
+  data: { month: string; count: number }[]
+  lang: 'en' | 'si'
+  t: (k: string) => string
 }) {
-  const id = `st-${title.replace(/\W+/g, '-').toLowerCase()}`
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
+
+  const chartData = data && data.length > 0 ? data : getDefaultMonths(6).map((m) => ({ month: m, count: 0 }))
+  const counts = chartData.map((d) => d.count)
+  // Axis top: at least 6, rounded up to a multiple of 3 so the 4 ticks (0, ⅓, ⅔, top) are whole numbers.
+  // The tick labels are derived from this same value, so they always match the plotted line.
+  const maxCount = Math.max(Math.ceil(Math.max(...counts, 6) / 3) * 3, 6)
+
+  const svgW = 500
+  const svgH = 185
+  const padL = 35
+  const padR = 25
+  const padT = 20
+  const padB = 35
+  const chartW = svgW - padL - padR
+  const chartH = svgH - padT - padB
+
+  const n = chartData.length || 1
+  const stepX = n > 1 ? chartW / (n - 1) : chartW
+
+  const points = chartData.map((d, i) => {
+    const x = padL + i * stepX
+    const y = padT + chartH - (d.count / maxCount) * chartH
+    return { x, y, count: d.count, month: d.month }
+  })
+
+  const lineD = points.length > 0 ? points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') : ''
+  const areaD = points.length > 0 ? `${lineD} L ${points[points.length - 1].x.toFixed(1)} ${padT + chartH} L ${points[0].x.toFixed(1)} ${padT + chartH} Z` : ''
+
+  const yTicks = [maxCount, (maxCount * 2) / 3, maxCount / 3, 0]
+
   return (
-    <section className="card panel">
-      <div className="panel-head">
-        <h2>{title}</h2>
-        <span className="spacer" />
-        <label htmlFor={id} className="sr-only">
-          {title} status
-        </label>
-        <select id={id} className="compact-select" value={status} onChange={(e) => onStatus(e.target.value as S | '')}>
-          <option value="">All statuses</option>
-          {(Object.keys(statuses) as S[]).map((s) => (
-            <option key={s} value={s}>
-              {statuses[s]}
-            </option>
-          ))}
-        </select>
-        {href && (
-          <Link href={href} className="small">
-            View all
-          </Link>
-        )}
-      </div>
-      {children}
-    </section>
+    <div className="analytics-chart-container" style={{ height: '185px' }}>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} className="analytics-svg" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="growthAreaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2563eb" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="#2563eb" stopOpacity="0.0" />
+          </linearGradient>
+        </defs>
+
+        {/* Gridlines */}
+        {yTicks.map((val) => {
+          const ratio = val / maxCount
+          const y = padT + chartH * (1 - ratio)
+          return (
+            <g key={val}>
+              <line x1={padL} y1={y} x2={padL + chartW} y2={y} stroke="var(--border)" strokeDasharray="3 3" />
+              <text x={padL - 10} y={y + 3.5} textAnchor="end" className="chart-axis-text">
+                {val}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Area fill & curve */}
+        {areaD && <path d={areaD} fill="url(#growthAreaGrad)" />}
+        {lineD && <path d={lineD} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />}
+
+        {/* Data points & X-axis labels */}
+        {points.map((p, idx) => {
+          const isHovered = hoveredIdx === idx
+          return (
+            <g key={idx} onMouseEnter={() => setHoveredIdx(idx)} onMouseLeave={() => setHoveredIdx(null)}>
+              <circle
+                cx={p.x}
+                cy={p.y}
+                r={isHovered ? 5.5 : 4}
+                fill="#2563eb"
+                stroke="var(--surface)"
+                strokeWidth={isHovered ? 2 : 1.5}
+                style={{ cursor: 'pointer', transition: 'r 0.15s ease' }}
+              />
+              {/* X Axis Label */}
+              <text x={p.x} y={svgH - 8} textAnchor="middle" className="chart-axis-text">
+                {formatMonthLabel(p.month, lang)}
+              </text>
+              {/* Hover Tooltip */}
+              {isHovered && (
+                <g>
+                  <rect
+                    x={Math.max(10, Math.min(svgW - 90, p.x - 45))}
+                    y={Math.max(4, p.y - 28)}
+                    width="90"
+                    height="22"
+                    rx="5"
+                    fill="var(--surface-elevated)"
+                    stroke="var(--border)"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={Math.max(10, Math.min(svgW - 90, p.x - 45)) + 45}
+                    y={Math.max(4, p.y - 28) + 14}
+                    textAnchor="middle"
+                    style={{ fontSize: '10.5px', fontWeight: 700, fill: 'var(--text-heading)' }}
+                  >
+                    {p.count} {t('dash.analytics.customers')}
+                  </text>
+                </g>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+    </div>
   )
 }
 
-const Empty = ({ children }: { children: React.ReactNode }) => <p className="muted small empty">{children}</p>
+// ─── Commission Earnings Bar Chart (SVG) ──────────────────────────────────────
 
-// ─── Dashboard ───────────────────────────────────────────────────────────────
+function CommissionEarningsChart({
+  data,
+  lang,
+  t,
+}: {
+  data: { month: string; earned: string; paid: string }[] | null
+  lang: 'en' | 'si'
+  t: (k: string) => string
+}) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
+
+  const chartData = data && data.length > 0 ? data : getDefaultMonths(6).map((m) => ({ month: m, earned: '0', paid: '0' }))
+  const numericEarned = chartData.map((d) => Number(d.earned) || 0)
+  const numericPaid = chartData.map((d) => Number(d.paid) || 0)
+  // Axis top: at least 5k, rounded up to a multiple of 5k; tick labels are derived from the same value
+  const maxVal = Math.ceil(Math.max(...numericEarned, ...numericPaid, 5000) / 5000) * 5000
+
+  const svgW = 500
+  const svgH = 185
+  const padL = 40
+  const padR = 25
+  const padT = 20
+  const padB = 35
+  const chartW = svgW - padL - padR
+  const chartH = svgH - padT - padB
+
+  const n = chartData.length || 1
+  const stepX = chartW / n
+  const barW = Math.min(12, stepX * 0.22)
+  const barGap = 3
+
+  const compact = (v: number) => (v >= 1000 ? `${v / 1000}k` : String(v))
+  const yTicks = [1, 0.6, 0].map((ratio) => ({ label: compact(maxVal * ratio), ratio }))
+
+  return (
+    <div className="analytics-chart-container" style={{ height: '185px' }}>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} className="analytics-svg" preserveAspectRatio="none">
+        {/* Gridlines */}
+        {yTicks.map((tick) => {
+          const y = padT + chartH * (1 - tick.ratio)
+          return (
+            <g key={tick.label}>
+              <line x1={padL} y1={y} x2={padL + chartW} y2={y} stroke="var(--border)" strokeDasharray="3 3" />
+              <text x={padL - 10} y={y + 3.5} textAnchor="end" className="chart-axis-text">
+                {tick.label}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Bars */}
+        {chartData.map((item, idx) => {
+          const earned = Number(item.earned) || 0
+          const paid = Number(item.paid) || 0
+          const hEarned = maxVal > 0 ? (earned / maxVal) * chartH : 0
+          const hPaid = maxVal > 0 ? (paid / maxVal) * chartH : 0
+
+          const centerX = padL + idx * stepX + stepX / 2
+          const xEarned = centerX - barW - barGap / 2
+          const xPaid = centerX + barGap / 2
+          const yEarned = padT + chartH - hEarned
+          const yPaid = padT + chartH - hPaid
+
+          const isHovered = hoveredIdx === idx
+
+          return (
+            <g key={idx} onMouseEnter={() => setHoveredIdx(idx)} onMouseLeave={() => setHoveredIdx(null)}>
+              {/* Earned Bar (Hexalyte Blue #2563EB) */}
+              {hEarned > 0 ? (
+                <rect x={xEarned} y={yEarned} width={barW} height={hEarned} fill="#2563eb" rx="3" />
+              ) : (
+                <line x1={xEarned} y1={padT + chartH} x2={xEarned + barW} y2={padT + chartH} stroke="rgba(37, 99, 235, 0.3)" strokeWidth="1" />
+              )}
+
+              {/* Paid Bar (Muted Gold #F59E0B) */}
+              {hPaid > 0 ? (
+                <rect x={xPaid} y={yPaid} width={barW} height={hPaid} fill="#f59e0b" rx="3" />
+              ) : (
+                <line x1={xPaid} y1={padT + chartH} x2={xPaid + barW} y2={padT + chartH} stroke="rgba(245, 158, 11, 0.3)" strokeWidth="1" />
+              )}
+
+              {/* X Axis Label */}
+              <text x={centerX} y={svgH - 8} textAnchor="middle" className="chart-axis-text">
+                {formatMonthLabel(item.month, lang)}
+              </text>
+
+              {/* Hover Tooltip */}
+              {isHovered && (
+                <g>
+                  <rect
+                    x={Math.max(10, Math.min(svgW - 140, centerX - 65))}
+                    y={Math.max(4, Math.min(yEarned, yPaid) - 34)}
+                    width="130"
+                    height="30"
+                    rx="6"
+                    fill="var(--surface-elevated)"
+                    stroke="var(--border)"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={Math.max(10, Math.min(svgW - 140, centerX - 65)) + 65}
+                    y={Math.max(4, Math.min(yEarned, yPaid) - 34) + 14}
+                    textAnchor="middle"
+                    style={{ fontSize: '10px', fill: '#3b82f6', fontWeight: 600 }}
+                  >
+                    {t('dash.analytics.earned')}: {formatMoney(earned, 'LKR')}
+                  </text>
+                  <text
+                    x={Math.max(10, Math.min(svgW - 140, centerX - 65)) + 65}
+                    y={Math.max(4, Math.min(yEarned, yPaid) - 34) + 25}
+                    textAnchor="middle"
+                    style={{ fontSize: '10px', fill: '#f59e0b', fontWeight: 600 }}
+                  >
+                    {t('dash.analytics.paid')}: {formatMoney(paid, 'LKR')}
+                  </text>
+                </g>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+    </div>
+  )
+}
+
+// ─── Main Dashboard Page ──────────────────────────────────────────────────────
 
 function Dashboard({ user }: { user: CurrentUser }) {
-  const [preset, setPreset] = useState<Preset>('all')
-  const [custom, setCustom] = useState({ from: '', to: '' })
-  const [productId, setProductId] = useState('')
-  const [customerStatus, setCustomerStatus] = useState<AccountStatus | ''>('')
-  const [trialStatus, setTrialStatus] = useState<TrialStatus | ''>('')
-  const [activationStatus, setActivationStatus] = useState<ActivationStatus | ''>('')
-  const [commissionStatus, setCommissionStatus] = useState<CommissionStatus | ''>('')
-
+  const { t, language } = useLanguage()
+  const partnerSummary = usePartnerSummaryContext()
+  // Admin-managed welcome text; falls back to the built-in translation while unset or unavailable.
+  // (The hero image is applied for every reseller page by ResellerShell.)
+  const appearance = useAppearance()
   const [data, setData] = useState<ResellerDashboard | null>(null)
+  const [tierRules, setTierRules] = useState<CommissionLevel[]>([])
+  const [tierRulesFailed, setTierRulesFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-
-  const range = preset === 'custom' ? custom : presetRange(preset)
-  const query = useMemo(() => {
-    const p = new URLSearchParams()
-    if (range.from) p.set('from', range.from)
-    if (range.to) p.set('to', range.to)
-    if (productId) p.set('productId', productId)
-    if (customerStatus) p.set('customerStatus', customerStatus)
-    if (trialStatus) p.set('trialStatus', trialStatus)
-    if (activationStatus) p.set('activationStatus', activationStatus)
-    if (commissionStatus) p.set('commissionStatus', commissionStatus)
-    return p.toString()
-  }, [range.from, range.to, productId, customerStatus, trialStatus, activationStatus, commissionStatus])
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
-    if (preset === 'custom' && custom.from && custom.to && custom.from > custom.to) {
-      setError('The start date must be on or before the end date.')
+    let active = true
+    api<CommissionLevel[]>('/commissions/levels')
+      .then((res) => {
+        if (!active) return
+        if (Array.isArray(res)) setTierRules(res)
+        else setTierRulesFailed(true)
+      })
+      // Rates come from the admin-editable settings; if they can't be loaded we say so
+      // instead of showing built-in numbers that may no longer be true.
+      .catch(() => active && setTierRulesFailed(true))
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!user.reseller || user.reseller.status !== 'ACTIVE') {
+      setData({
+        reseller: {
+          id: user.reseller?.id || '',
+          code: user.reseller?.code || '',
+          businessName: user.reseller?.businessName || user.name,
+        },
+        products: [],
+        filters: { from: null, to: null, productId: null },
+        kpis: {
+          level: {
+            level: null,
+            name: null,
+            activeCount: 0,
+            nextLevel: { name: 'Level 1', customersNeeded: 1 },
+            ratePercent: '0',
+          },
+          activeCustomers: 0,
+          totalCustomers: 0,
+          trialCustomers: 0,
+          activeSubscriptions: 0,
+          pendingActivationRequests: 0,
+          commission: { currency: 'LKR', thisMonth: '0.00', pending: '0.00', paid: '0.00' },
+        },
+        period: {
+          newCustomers: 0,
+          trialsCreated: 0,
+          activationsSubmitted: 0,
+          commissionEarned: '0.00',
+          commissionPaid: '0.00',
+        },
+        recent: { customers: [], trials: [], activations: [], commissions: [] },
+        analytics: { customerGrowth: [], commissionEarnings: [] },
+      })
+      setLoading(false)
+      setError(null)
       return
     }
-    let cancelled = false
+
     setLoading(true)
-    api<ResellerDashboard>(`/dashboard/reseller${query ? `?${query}` : ''}`)
+    setError(null)
+    api<ResellerDashboard>('/dashboard/reseller')
       .then((d) => {
         if (cancelled) return
         setData(d)
-        setError(null)
       })
-      .catch((err) => !cancelled && setError(err instanceof ApiError ? err.message : 'Failed to load the dashboard'))
+      .catch((err) => !cancelled && setError(err instanceof ApiError ? err.message : t('dash.error.load')))
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
     }
-  }, [query]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user.reseller, user.name, t, attempt])
 
-  const filtered = preset !== 'all' || productId !== ''
-  const resetFilters = () => {
-    setPreset('all')
-    setCustom({ from: '', to: '' })
-    setProductId('')
+  const formattedUserName = user.name
+    ? user.name
+        .split(' ')
+        .map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : ''))
+        .join(' ')
+    : user.name
+
+  // The welcome hero needs nothing from the dashboard request, so it stays on screen while that request is pending, has failed
+  // or is being retried. Only the data sections below it are replaced by the loading text or the error with its Retry.
+  const hero = (
+    <div className="dash-welcome-hero-v2">
+      <div className="dash-hero-content">
+        <span className="dash-hero-greeting">{t('dash.hero.greeting')}</span>
+        <h1 className="dash-hero-title">{welcomeHeading(language, appearance, formattedUserName, t('dash.hero.welcome', { name: formattedUserName }))}</h1>
+        <p className="dash-hero-subtitle">{t('dash.hero.subtitle')}</p>
+      </div>
+
+      {user.permissions.includes('demos:create') && (
+        <div className="dash-hero-actions">
+          <Link href="/demo-requests/new" className="dash-primary-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M3 9h18" />
+              <path d="m9 15 2 2 4-4" />
+            </svg>
+            <span>{t('dash.newDemoRequestBtn')}</span>
+          </Link>
+        </div>
+      )}
+    </div>
+  )
+
+  if (!data) {
+    return (
+      <>
+        <div className="dash-hero-kpi-backdrop">{hero}</div>
+        {error ? (
+          <div className="alert error" role="alert">
+            {error}{' '}
+            <button className="btn secondary small" onClick={() => setAttempt((n) => n + 1)}>
+              {t('common.retry')}
+            </button>
+          </div>
+        ) : (
+          <p className="muted" style={{ padding: '1rem 0' }}>{t('common.loading')}</p>
+        )}
+      </>
+    )
   }
 
-  const periodLabel =
-    preset === 'all'
-      ? 'All time'
-      : preset === 'custom'
-        ? `${custom.from ? formatDate(custom.from) : 'Start'} – ${custom.to ? formatDate(custom.to) : 'today'}`
-        : PRESETS.find((p) => p.value === preset)!.label
-  const productName = data?.products.find((p) => p.id === productId)?.name
-
-  const can = (p: string) => user.permissions.includes(p)
-
-  return (
-    <>
-      <div className="dash-head">
-        <div>
-          <h1>Dashboard</h1>
-          <div className="muted small">
-            {user.name}
-            {user.reseller && (
-              <>
-                {' '}
-                · {user.reseller.businessName} · <span className="mono">{user.reseller.code}</span>
-              </>
-            )}
-          </div>
-        </div>
-        <span className="spacer" />
-        <div className="dash-actions">
-          {can('trials:create') && (
-            <Link href="/trials/new" className="btn secondary">
-              New trial
-            </Link>
-          )}
-          {can('activations:create') && (
-            <Link href="/activations/new" className="btn">
-              New activation request
-            </Link>
-          )}
-        </div>
-      </div>
-
-      <div className="card filter-bar">
-        <div className="field inline">
-          <label htmlFor="f-date">Date</label>
-          <select id="f-date" value={preset} onChange={(e) => setPreset(e.target.value as Preset)}>
-            {PRESETS.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        {preset === 'custom' && (
-          <>
-            <div className="field inline">
-              <label htmlFor="f-from">From</label>
-              <input id="f-from" type="date" value={custom.from} max={custom.to || undefined} onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))} />
-            </div>
-            <div className="field inline">
-              <label htmlFor="f-to">To</label>
-              <input id="f-to" type="date" value={custom.to} min={custom.from || undefined} onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))} />
-            </div>
-          </>
-        )}
-        <div className="field inline">
-          <label htmlFor="f-product">SaaS product</label>
-          <select id="f-product" value={productId} onChange={(e) => setProductId(e.target.value)}>
-            <option value="">All products</option>
-            {data?.products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <span className="spacer" />
-        {loading && data && <span className="small muted">Updating…</span>}
-        {filtered && (
-          <button className="btn link small" onClick={resetFilters}>
-            Clear filters
-          </button>
-        )}
-      </div>
-
-      {error && <div className="alert error">{error}</div>}
-      {!data ? (
-        !error && <p className="muted">Loading…</p>
-      ) : (
-        <DashboardBody
-          data={data}
-          periodLabel={periodLabel}
-          productName={productName}
-          panels={{
-            customerStatus,
-            setCustomerStatus,
-            trialStatus,
-            setTrialStatus,
-            activationStatus,
-            setActivationStatus,
-            commissionStatus,
-            setCommissionStatus,
-          }}
-        />
-      )}
-    </>
-  )
-}
-
-interface PanelState {
-  customerStatus: AccountStatus | ''
-  setCustomerStatus: (s: AccountStatus | '') => void
-  trialStatus: TrialStatus | ''
-  setTrialStatus: (s: TrialStatus | '') => void
-  activationStatus: ActivationStatus | ''
-  setActivationStatus: (s: ActivationStatus | '') => void
-  commissionStatus: CommissionStatus | ''
-  setCommissionStatus: (s: CommissionStatus | '') => void
-}
-
-function DashboardBody({ data, periodLabel, productName, panels }: { data: ResellerDashboard; periodLabel: string; productName?: string; panels: PanelState }) {
-  const { kpis, period, recent } = data
+  const { kpis, recent, analytics } = data
   const level = kpis.level
-  const money = (v: string | null | undefined) => formatMoney(v ?? 0, kpis.commission?.currency ?? 'LKR')
-  const scope = productName ? ` · ${productName}` : ''
+
+  // Partner tier rates. The CURRENT rate is the server's own figure from /dashboard/reseller.
+  // The NEXT level's rate comes from the live (admin-editable) commission settings; if those
+  // could not be loaded it is shown as "—" instead of a built-in guess that may be out of date.
+  const asPercent = (rate: string | number | null | undefined): string | null =>
+    rate === null || rate === undefined || rate === '' ? null : `${Number(rate)}%`
+
+  const settingsRateFor = (name: string): string | null => {
+    const match = tierRules.find((r) => r.name.toLowerCase() === name.toLowerCase())
+    return match ? asPercent(match.ratePercent) : null
+  }
+
+  const currentCount = level.activeCount ?? 0
+  const neededForNext = level.nextLevel?.customersNeeded ?? 0
+  const targetNext = currentCount + neededForNext
+  const progressPercent = !level.nextLevel
+    ? 100
+    : targetNext > 0
+      ? Math.min(100, Math.max(0, Math.round((currentCount / targetNext) * 100)))
+      : 0
+
+  const currentLevelName =
+    level.level !== null
+      ? (level.name ?? `Level ${level.level}`)
+      : currentCount > 0
+        ? (level.name ?? 'Level 1')
+        : t('dash.growth.standardPartner')
+
+  const currentCommissionRate =
+    level.level === null && currentCount === 0 ? '0%' : (asPercent(level.ratePercent) ?? '—')
+
+  const nextLevelName = level.nextLevel ? level.nextLevel.name : t('dash.growth.maxLevelReached')
+
+  // A level reached in the last two weeks (from the backend's recorded level history) is marked as new.
+  const justReachedLevel = recentLevelUp(partnerSummary)?.toLevel ?? null
+  // Levels are numbered 1, 2, 3… without gaps, so the next level is always the current one + 1.
+  const nextBadgeLevel = level.nextLevel ? (level.level ?? 0) + 1 : null
+
+  const nextCommissionRate = level.nextLevel
+    ? (settingsRateFor(level.nextLevel.name) ?? (currentCount === 0 ? (asPercent(level.ratePercent) ?? '—') : '—'))
+    : '—'
+
+  // Commission already paid out to this reseller (NOT total earned: pending/payable are separate)
+  const commissionPaidAmount = kpis.commission?.paid ? Number(kpis.commission.paid) : 0
+
+  // Recent paid-activation requests for the activity panel (up to 5 items)
+  const recentActivations = (recent.activations || [])
+    .map((ac) => ({
+      id: ac.id,
+      customerName: ac.customerAccount?.customer?.displayName || '—',
+      productName: ac.product?.name || '—',
+      date: ac.submittedAt,
+      status: ac.status,
+      href: `/activations/${ac.id}`,
+    }))
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 5)
 
   return (
     <>
-      <div className="kpi-grid">
-        <Kpi
-          tone="primary"
-          label="Current reseller level"
-          value={level.name ?? 'No level yet'}
-          hint={level.nextLevel ? `${level.nextLevel.customersNeeded} more active to reach ${level.nextLevel.name}` : level.level ? 'Highest level reached' : undefined}
-          href={kpis.commission ? '/commissions' : undefined}
-        />
-        {level.ratePercent !== null && (
-          <Kpi tone="primary" label="Current commission" value={`${Number(level.ratePercent)}%`} hint={level.level ? `Level ${level.level} rate` : 'Rate for your first active customer'} />
-        )}
-        <Kpi label="Active customers" value={kpis.activeCustomers} hint={`${level.activeCount} active subscription${level.activeCount === 1 ? '' : 's'} count toward your level`} />
-        <Kpi label="Total customers" value={kpis.totalCustomers} hint={productName ? `With ${productName}` : undefined} />
-        <Kpi label="Trial customers" value={kpis.trialCustomers} href="/trials" />
-        <Kpi label="Active subscriptions" value={kpis.activeSubscriptions} />
-        {kpis.pendingActivationRequests !== null && (
-          <Kpi
-            label="Pending activation requests"
-            value={kpis.pendingActivationRequests}
-            hint="Awaiting Hexalyte review or activation"
-            href="/activations"
-            tone={kpis.pendingActivationRequests > 0 ? 'warning' : undefined}
+      {/* ── Hero + KPI Backdrop (single landscape background) ── */}
+      <div className="dash-hero-kpi-backdrop">
+        {/* ── Welcome Hero Banner ── */}
+        {hero}
+
+        {/* ── 4 Primary KPI Cards in One Row (glass cards over landscape) ── */}
+        <div className="kpi-grid-v2">
+          <KpiCardV2
+            label={t('dash.kpi.totalCustomers')}
+            value={kpis.totalCustomers}
+            sub={t('dash.kpi.totalCustomersHint')}
+            accent="blue"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            }
           />
-        )}
-        {kpis.commission && (
-          <>
-            <Kpi label={`This month's commission`} value={money(kpis.commission.thisMonth)} hint={monthLabel(currentPeriod())} href="/commissions" />
-            <Kpi label="Pending commission" value={money(kpis.commission.pending)} hint="Earned, not yet paid out" href="/commissions" />
-            <Kpi label="Paid commission" value={money(kpis.commission.paid)} hint="Total paid to you" href="/commissions" />
-          </>
-        )}
+          <KpiCardV2
+            label={t('dash.kpi.activeCustomers')}
+            value={kpis.activeCustomers}
+            sub={t('dash.kpi.activeCustomersHintPlural', { count: kpis.activeCustomers })}
+            accent="emerald"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="9 12 12 15 16 10" />
+              </svg>
+            }
+          />
+          <KpiCardV2
+            label={t('dash.kpi.pendingActivations')}
+            value={kpis.pendingActivationRequests ?? 0}
+            sub={t('dash.kpi.pendingActivationsHint')}
+            href={user.permissions.includes('activations:read') ? '/activations' : undefined}
+            accent="amber"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            }
+          />
+          <KpiCardV2
+            label={t('dash.kpi.commissionPaid')}
+            value={formatMoney(commissionPaidAmount, 'LKR')}
+            sub={t('dash.kpi.commissionPaidHint')}
+            href="/commissions"
+            accent="purple"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="1" x2="12" y2="23" />
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+              </svg>
+            }
+          />
+        </div>
       </div>
 
-      <div className="card period-strip">
-        <div className="period-title">
-          <strong>{periodLabel}</strong>
-          <span className="muted small">{scope}</span>
-        </div>
-        <div className="period-items">
-          <div>
-            <span className="period-value">{period.newCustomers}</span> new customers
-          </div>
-          {period.trialsCreated !== null && (
+      {/* ── Partner Onboarding Notice (If Pending/Not Active) ── */}
+      {(!user.reseller || user.reseller.status !== 'ACTIVE') && (
+        <div className="card" style={{ marginBottom: '1.35rem', borderLeft: user.reseller?.status === 'PENDING' ? '4px solid #f59e0b' : '4px solid #2563eb' }}>
+          {user.reseller?.status === 'PENDING' ? (
             <div>
-              <span className="period-value">{period.trialsCreated}</span> trial requests
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                <strong style={{ fontSize: '1.05rem', color: 'var(--text-heading)' }}>{t('dash.onboarding.underReviewTitle')}</strong>
+                <span className="badge PENDING">{t('dash.onboarding.underReviewBadge')}</span>
+              </div>
+              <p className="muted small" style={{ margin: '0 0 0.8rem' }}>
+                {t('dash.onboarding.underReviewDesc', { name: user.reseller?.businessName || '', code: user.reseller?.code || '' })}
+              </p>
             </div>
-          )}
-          {period.activationsSubmitted !== null && (
+          ) : user.reseller?.status === 'REJECTED' ? (
             <div>
-              <span className="period-value">{period.activationsSubmitted}</span> activation requests
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                <strong style={{ fontSize: '1.05rem', color: '#ef4444' }}>{t('dash.onboarding.rejectedTitle')}</strong>
+                <span className="badge REJECTED">{t('dash.onboarding.rejectedBadge')}</span>
+              </div>
+              <p className="muted small" style={{ margin: '0 0 0.8rem' }}>
+                {t('dash.onboarding.rejectedDesc')}
+              </p>
+              <Link href="/dashboard/become-reseller" className="btn small">
+                {t('dash.onboarding.reapplyBtn')}
+              </Link>
             </div>
-          )}
-          {period.commissionEarned !== null && (
-            <div>
-              <span className="period-value">{money(period.commissionEarned)}</span> commission earned
-            </div>
-          )}
-          {period.commissionPaid !== null && (
-            <div>
-              <span className="period-value">{money(period.commissionPaid)}</span> paid out
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="dash-grid">
-        <Panel title="Recent customers" status={panels.customerStatus} statuses={ACCOUNT_STATUS_LABELS} onStatus={panels.setCustomerStatus}>
-          {recent.customers.length === 0 ? (
-            <Empty>No customers match these filters.</Empty>
           ) : (
-            <ul className="recent-list">
-              {recent.customers.map((c) => (
-                <li key={c.id}>
-                  <div className="recent-main">
-                    <strong>{c.displayName}</strong>
-                    <span className="muted small">Added {formatDate(c.createdAt)}</span>
-                  </div>
-                  <div className="recent-tags">
-                    {c.accounts.map((a) => (
-                      <span key={a.id} className={`badge sub-${a.status}`} title={a.product.name}>
-                        {a.product.name}: {ACCOUNT_STATUS_LABELS[a.status]}
-                      </span>
-                    ))}
-                  </div>
-                </li>
-              ))}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                <strong style={{ fontSize: '1.05rem', color: 'var(--text-heading)' }}>{t('dash.onboarding.verifiedTitle')}</strong>
+                <span className="badge ACTIVE">{t('dash.onboarding.verifiedBadge')}</span>
+              </div>
+              <p className="muted small" style={{ margin: '0 0 0.8rem' }}>
+                {t('dash.onboarding.verifiedDesc')}
+              </p>
+              <Link href="/dashboard/become-reseller" className="btn small">
+                {t('dash.onboarding.startAppBtn')}
+              </Link>
+            </div>
+          )}
+        </div>
+      )}
+
+
+
+      {/* ── Partner Level & Growth Progress Card ── */}
+      <div className="partner-growth-v2">
+        <div className="partner-growth-v2-header">
+          <div className="partner-growth-v2-title-group">
+            {/* The seller's achievement badge for their current level (look by level, name from the Admin-managed levels) */}
+            <LevelBadge level={level.level} name={level.name} size="lg" />
+            <div>
+              <h3 className="partner-growth-v2-title">{t('dash.growth.title')}</h3>
+              <p className="partner-growth-v2-sub">{t('dash.growth.subtitle')}</p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            {justReachedLevel !== null && <span className="partner-growth-levelup">{t('dash.growth.leveledUp')}</span>}
+            <span className="partner-growth-v2-level-badge">{t('dash.growth.qualifying', { count: currentCount })}</span>
+          </div>
+        </div>
+
+        <div className="partner-growth-v2-boxes">
+          {/* Box 1: Current Level & Commission */}
+          <div className="partner-growth-box">
+            <div className="partner-growth-box-col">
+              <span className="partner-growth-box-label">{t('dash.growth.currentLevel')}</span>
+              <span className="partner-growth-box-val">{currentLevelName}</span>
+            </div>
+            <div className="partner-growth-box-col" style={{ alignItems: 'flex-end' }}>
+              <span className="partner-growth-box-label">{t('dash.growth.currentCommission')}</span>
+              <span className="partner-growth-box-val blue">{currentCommissionRate}</span>
+            </div>
+          </div>
+
+          {/* Box 2: Next Level & Commission */}
+          <div className="partner-growth-box">
+            <div className="partner-growth-box-col">
+              <span className="partner-growth-box-label">{t('dash.growth.nextLevel')}</span>
+              <span className="partner-growth-box-val">{nextLevelName}</span>
+            </div>
+            <div className="partner-growth-box-col" style={{ alignItems: 'flex-end' }}>
+              <span className="partner-growth-box-label">{t('dash.growth.nextCommission')}</span>
+              <span className="partner-growth-box-val emerald">{nextCommissionRate}</span>
+            </div>
+          </div>
+
+          {/* Box 3: Target box */}
+          <div className="partner-growth-target-box">
+            <div className="partner-growth-target-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            </div>
+            <div className="partner-growth-target-main">
+              <span className="partner-growth-target-text">
+                {level.nextLevel
+                  ? t('dash.growth.targetText', { count: neededForNext })
+                  : t('dash.growth.topLevelReached', { rate: currentCommissionRate })}
+              </span>
+              <span className="partner-growth-target-sub">
+                {level.nextLevel ? t('dash.growth.toReach', { level: nextLevelName }) : ''}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Progress Bar & Labels */}
+        <div className="partner-growth-progress-container">
+          {/* current badge → progress → next badge (locked until reached) */}
+          <div className="partner-growth-progress-row">
+            <LevelBadge level={level.level} name={level.name} size="sm" />
+            <div className="partner-growth-track" style={{ flex: 1, minWidth: 0 }}>
+              <div className="partner-growth-bar" style={{ width: `${progressPercent}%` }} />
+            </div>
+            {nextBadgeLevel !== null && <LevelBadge level={nextBadgeLevel} name={level.nextLevel?.name} size="sm" locked />}
+          </div>
+          <div className="partner-growth-progress-footer">
+            <span>
+              {level.nextLevel
+                ? t('dash.growth.progressCount', { current: currentCount, target: targetNext })
+                : t('dash.growth.progressCountFull', { current: currentCount })}
+            </span>
+            <span style={{ fontWeight: 600 }}>{t('dash.growth.percentComplete', { percent: progressPercent })}</span>
+          </div>
+        </div>
+        {/* Achievement badges: every level the Admin has configured, reached ones lit */}
+        {tierRules.length > 0 && (
+          <div style={{ marginTop: '1.15rem' }}>
+            <div className="small muted" style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.6rem' }}>
+              {t('dash.growth.badges')}
+            </div>
+            <LevelLadder levels={tierRules} currentLevel={level.level} justReached={justReachedLevel} />
+          </div>
+        )}
+        {tierRulesFailed && level.nextLevel && (
+          <p className="small muted" role="status" style={{ margin: '0.75rem 0 0' }}>
+            {t('dash.rates.unavailable')}
+          </p>
+        )}
+      </div>
+
+      {/* ── Business Analytics: Two Real Data Graphs ── */}
+      <section className="analytics-section-v2">
+        <div className="analytics-v2-header">
+          <div className="analytics-v2-title-group">
+            <div className="analytics-v2-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10" />
+                <line x1="12" y1="20" x2="12" y2="4" />
+                <line x1="6" y1="20" x2="6" y2="14" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="analytics-v2-title">{t('dash.analytics.title')}</h2>
+              <p className="analytics-v2-sub">{t('dash.analytics.subtitle')}</p>
+            </div>
+          </div>
+
+          {/* The server always returns the last 6 months, so this states the period; it is not a selector. */}
+          <div className="analytics-v2-range-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+              <line x1="16" y1="2" x2="16" y2="6" />
+              <line x1="8" y1="2" x2="8" y2="6" />
+              <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            <span>{t('dash.analytics.range6m')}</span>
+          </div>
+        </div>
+
+        <div className="analytics-v2-grid">
+          {/* Chart 1: Customer Growth */}
+          <div className="analytics-v2-card">
+            <div className="analytics-v2-card-head">
+              <div className="analytics-v2-card-title-group">
+                <div className="analytics-v2-card-icon blue">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="analytics-v2-card-title">{t('dash.analytics.customerGrowth')}</h3>
+                  <p className="analytics-v2-card-desc">{t('dash.analytics.customerGrowthDesc')}</p>
+                </div>
+              </div>
+              <div className="analytics-v2-legend">
+                <div className="analytics-v2-legend-item">
+                  <span className="analytics-v2-legend-square" style={{ background: '#2563eb' }} />
+                  <span>{t('dash.analytics.customers')}</span>
+                </div>
+              </div>
+            </div>
+            <CustomerGrowthChart data={analytics?.customerGrowth || []} lang={language} t={t} />
+          </div>
+
+          {/* Chart 2: Commission Earnings */}
+          <div className="analytics-v2-card">
+            <div className="analytics-v2-card-head">
+              <div className="analytics-v2-card-title-group">
+                <div className="analytics-v2-card-icon gold">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="1" x2="12" y2="23" />
+                    <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="analytics-v2-card-title">{t('dash.analytics.commissions')}</h3>
+                  <p className="analytics-v2-card-desc">{t('dash.analytics.commissionsDesc')}</p>
+                </div>
+              </div>
+              <div className="analytics-v2-legend">
+                <div className="analytics-v2-legend-item">
+                  <span className="analytics-v2-legend-square" style={{ background: '#2563eb' }} />
+                  <span>{t('dash.analytics.earned')}</span>
+                </div>
+                <div className="analytics-v2-legend-item">
+                  <span className="analytics-v2-legend-square" style={{ background: '#f59e0b' }} />
+                  <span>{t('dash.analytics.paid')}</span>
+                </div>
+              </div>
+            </div>
+            <CommissionEarningsChart data={analytics?.commissionEarnings || null} lang={language} t={t} />
+          </div>
+        </div>
+      </section>
+
+      {/* ── Recent Activity: Two Balanced Side-by-Side Panels ── */}
+      <div className="activity-v2-grid">
+        {/* Panel 1: Recent Customers */}
+        <section className="activity-v2-card">
+          <div className="activity-v2-head">
+            <div className="activity-v2-title-group">
+              <div className="activity-v2-icon blue">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="activity-v2-title">{t('dash.recent.customersTitle')}</h3>
+                <p className="activity-v2-desc">{t('dash.recent.customersSub')}</p>
+              </div>
+            </div>
+            <Link href="/customers" className="activity-v2-viewall">
+              <span>View All</span>
+              <span>&rarr;</span>
+            </Link>
+          </div>
+
+          {recent.customers.length === 0 ? (
+            <div className="analytics-empty-box">
+              <p className="small muted" style={{ margin: 0 }}>{t('dash.recent.emptyCustomers')}</p>
+            </div>
+          ) : (
+            <ul className="activity-v2-list">
+              {recent.customers.slice(0, 5).map((c) => {
+                const initial = c.displayName ? c.displayName.trim()[0]?.toUpperCase() : '—'
+                // Real data only: a customer with no SaaS account says so instead of showing a made-up product/status
+                const primaryAccount = c.accounts && c.accounts.length > 0 ? c.accounts[0] : null
+                const extraAccounts = (c.accounts?.length ?? 0) - 1
+                const productName = primaryAccount
+                  ? `${primaryAccount.product.name}${extraAccounts > 0 ? ` +${extraAccounts}` : ''}`
+                  : t('dash.recent.noAccount')
+
+                return (
+                  <li key={c.id} className="activity-v2-item">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0, flex: 1 }}>
+                      <div className="activity-v2-avatar">{initial}</div>
+                      <div className="activity-v2-main">
+                        <span className="activity-v2-name">{c.displayName}</span>
+                        <span className="activity-v2-product">{productName}</span>
+                      </div>
+                    </div>
+                    <div className="activity-v2-right">
+                      {primaryAccount && getStatusPill(primaryAccount.status, t)}
+                      <span className="activity-v2-date">{formatDisplayDate(c.createdAt)}</span>
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           )}
-        </Panel>
+        </section>
 
-        {recent.trials && (
-          <Panel title="Recent trial requests" href="/trials" status={panels.trialStatus} statuses={TRIAL_STATUS_LABELS} onStatus={panels.setTrialStatus}>
-            {recent.trials.length === 0 ? (
-              <Empty>No trial requests match these filters.</Empty>
-            ) : (
-              <ul className="recent-list">
-                {recent.trials.map((t) => (
-                  <li key={t.id}>
-                    <div className="recent-main">
-                      <strong>{t.customerAccount.customer.displayName}</strong>
-                      <span className="muted small">
-                        {t.product.name} · {formatDate(t.createdAt)}
-                      </span>
-                      {t.status === 'FAILED' && t.errorMessage && <span className="small negative">{t.errorMessage}</span>}
-                    </div>
-                    <span className={`badge trial-${t.status}`}>{TRIAL_STATUS_LABELS[t.status]}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
-        )}
+        {/* Panel 2: Recent Activations */}
+        <section className="activity-v2-card">
+          <div className="activity-v2-head">
+            <div className="activity-v2-title-group">
+              <div className="activity-v2-icon gold">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="activity-v2-title">{t('dash.recent.activityTitle')}</h3>
+                <p className="activity-v2-desc">{t('dash.recent.activitySub')}</p>
+              </div>
+            </div>
+            <Link href="/activations" className="activity-v2-viewall">
+              <span>View All</span>
+              <span>&rarr;</span>
+            </Link>
+          </div>
 
-        {recent.activations && (
-          <Panel title="Recent activation requests" href="/activations" status={panels.activationStatus} statuses={ACTIVATION_STATUS_LABELS} onStatus={panels.setActivationStatus}>
-            {recent.activations.length === 0 ? (
-              <Empty>No activation requests match these filters.</Empty>
-            ) : (
-              <ul className="recent-list">
-                {recent.activations.map((a) => (
-                  <li key={a.id}>
-                    <div className="recent-main">
-                      <Link href={`/activations/${a.id}`}>
-                        <strong>{a.customerAccount.customer.displayName}</strong>
-                      </Link>
-                      <span className="muted small">
-                        <span className="mono">{a.reference}</span> · {a.product.name} · {monthLabel(a.periodMonth)} · {formatMoney(a.amount, a.currency)}
-                      </span>
-                    </div>
-                    <span className={`badge act-${a.status}`}>{ACTIVATION_STATUS_LABELS[a.status]}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
-        )}
+          {recentActivations.length === 0 ? (
+            <div className="analytics-empty-box">
+              <p className="small muted" style={{ margin: 0 }}>{t('dash.recent.emptyActivity')}</p>
+            </div>
+          ) : (
+            <ul className="activity-v2-list">
+              {recentActivations.map((item) => {
+                const initial = item.customerName ? item.customerName.trim()[0]?.toUpperCase() : '—'
 
-        {recent.commissions && (
-          <Panel title="Recent commission transactions" href="/commissions" status={panels.commissionStatus} statuses={COMMISSION_STATUS_LABELS} onStatus={panels.setCommissionStatus}>
-            {recent.commissions.length === 0 ? (
-              <Empty>No commission transactions match these filters.</Empty>
-            ) : (
-              <ul className="recent-list">
-                {recent.commissions.map((c) => (
-                  <li key={c.id}>
-                    <div className="recent-main">
-                      <strong>{c.customerAccount.customer.displayName}</strong>
-                      <span className="muted small">
-                        {c.entryType === 'CLAWBACK' ? 'Clawback' : `${Number(c.rate)}% commission`} · {c.product.name} · {monthLabel(c.periodMonth)}
-                      </span>
+                return (
+                  <li key={item.id} className="activity-v2-item">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0, flex: 1 }}>
+                      <div className="activity-v2-avatar">{initial}</div>
+                      <div className="activity-v2-main">
+                        <Link href={item.href} style={{ textDecoration: 'none', color: 'inherit' }}>
+                          <span className="activity-v2-name">{item.customerName}</span>
+                        </Link>
+                        <span className="activity-v2-product">{item.productName}</span>
+                      </div>
                     </div>
-                    <div className="recent-amount">
-                      <strong className={Number(c.amount) < 0 ? 'negative' : undefined}>{formatMoney(c.amount, c.currency)}</strong>
-                      <span className={`badge ${c.status}`}>{COMMISSION_STATUS_LABELS[c.status]}</span>
+                    <div className="activity-v2-right">
+                      {getStatusPill(item.status, t)}
+                      <span className="activity-v2-date">{formatDisplayDate(item.date)}</span>
                     </div>
                   </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
-        )}
+                )
+              })}
+            </ul>
+          )}
+        </section>
       </div>
     </>
   )
@@ -486,9 +967,9 @@ export default function DashboardPage() {
   return (
     <ResellerShell>
       {(user) => (
-        <main className="container">
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
           <Dashboard user={user} />
-        </main>
+        </div>
       )}
     </ResellerShell>
   )

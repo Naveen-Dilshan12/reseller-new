@@ -56,7 +56,7 @@ export function BankSlipViewer({ requestId, slip }: { requestId: string; slip: B
   return (
     <div className="slip">
       <div className="row">
-        <div>
+        <div className="slip-info">
           <strong>{slip.originalName}</strong>
           <div className="small muted">
             {slip.mimeType === 'application/pdf' ? 'PDF' : 'Image'} · {formatBytes(slip.sizeBytes)}

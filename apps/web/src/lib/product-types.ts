@@ -57,10 +57,54 @@ export interface IntegrationProviderInfo {
   requiresCredentials: boolean
 }
 
+/** What a lifecycle change (retire, restore, set coming soon, launch) touches (GET /admin/saas-products/:id/impact). Counts only. */
+export interface ProductImpact {
+  productId: string
+  status: ProductStatus
+  customerAccounts: { active: number; trial: number; pending: number }
+  openActivationRequests: number
+  openDemoRequests: { total: number; awaitingConfirmation: number }
+  unpaidCommissions: { count: number; totals: { currency: string; amount: string }[] }
+  resellers: { withAccess: number; approvedWithoutAccess: number }
+}
+
+/** An approved reseller with no access record for a product (GET /admin/saas-products/:id/resellers-without-access). */
+export interface ResellerWithoutAccess {
+  id: string
+  code: string
+  businessName: string
+  approvedAt: string | null
+}
+
+/** The only ways a product's status changes; each is POST /admin/saas-products/:id/<action>. */
+export type LifecycleAction = 'retire' | 'restore' | 'coming-soon' | 'launch'
+
+/** Button label and confirm label of each lifecycle action. */
+export const LIFECYCLE_LABELS: Record<LifecycleAction, string> = {
+  retire: 'Retire product',
+  restore: 'Restore product',
+  'coming-soon': 'Set coming soon',
+  launch: 'Launch product',
+}
+
+/** What the server accepts from each status (see productLifecycleService): the page offers exactly these. */
+export const LIFECYCLE_ACTIONS: Record<ProductStatus, readonly LifecycleAction[]> = {
+  ACTIVE: ['retire', 'coming-soon'],
+  COMING_SOON: ['launch', 'retire'],
+  INACTIVE: ['restore', 'coming-soon'],
+}
+
 export const PRODUCT_STATUS_LABELS: Record<ProductStatus, string> = {
   ACTIVE: 'Active',
   INACTIVE: 'Inactive',
   COMING_SOON: 'Coming soon',
+}
+
+/** Only an Active product can be sold (trials, demos and paid activations all check it); existing subscriptions are unaffected. */
+export const PRODUCT_STATUS_DESCRIPTIONS: Record<ProductStatus, string> = {
+  ACTIVE: 'On sale: partners with active access can sell it.',
+  COMING_SOON: 'Not launched yet: partners cannot sell it until it is launched. Existing paid subscriptions and commissions continue.',
+  INACTIVE: 'Off sale: partners cannot sell it. Existing paid subscriptions and commissions continue.',
 }
 
 export const INTEGRATION_STATUS_LABELS: Record<IntegrationStatus, string> = {

@@ -1,175 +1,122 @@
 'use client'
 
-import { useState } from 'react'
+import React, { useState } from 'react'
+import { AuthLayout } from '@/components/auth/AuthLayout'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import {
+  Eye,
+  EyeOff,
+  Mail,
+  Phone,
+  Lock,
+  User,
+  ArrowRight,
+  AlertCircle,
+} from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
-import { Field } from '@/components/Field'
-
-type Values = Record<string, string>
-
-interface FieldDef {
-  name: string
-  label: string
-  type?: string
-  hint?: string
-  multiline?: boolean
-  wide?: boolean
-  autoComplete?: string
-  validate: (v: string, all: Values) => string | undefined
-}
-
-const strip = (v: string) => v.replace(/[\s-]/g, '')
-const required = (label: string, min = 2) => (v: string) => (v.trim().length < min ? `${label} is required` : undefined)
-const emailRule = (v: string) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim()) ? undefined : 'Enter a valid email address')
-const mobileRule = (v: string) => (/^(\+94|0)7\d{8}$/.test(strip(v)) ? undefined : 'Enter a valid mobile number, e.g. 0771234567')
-const phoneRule = (v: string) => (/^(\+94|0)\d{9}$/.test(strip(v)) ? undefined : 'Enter a valid phone number, e.g. 0112345678')
-
-const STEPS: { title: string; fields: FieldDef[] }[] = [
-  {
-    title: 'Personal details',
-    fields: [
-      { name: 'personal.fullName', label: 'Full name', autoComplete: 'name', validate: required('Full name', 3) },
-      {
-        name: 'personal.nicOrPassport',
-        label: 'NIC / Passport number',
-        hint: 'e.g. 123456789V, 200012345678 or N1234567',
-        validate: (v) =>
-          /^(\d{9}[VX]|\d{12}|[A-Z][A-Z0-9]{5,11})$/.test(strip(v).toUpperCase()) ? undefined : 'Enter a valid NIC or passport number',
-      },
-      { name: 'personal.email', label: 'Email', type: 'email', autoComplete: 'email', hint: 'Used to log in', validate: emailRule },
-      { name: 'personal.mobile', label: 'Mobile number', type: 'tel', autoComplete: 'tel', validate: mobileRule },
-      { name: 'personal.address', label: 'Address', multiline: true, wide: true, validate: required('Address', 5) },
-    ],
-  },
-  {
-    title: 'Business details',
-    fields: [
-      { name: 'business.businessName', label: 'Business name', autoComplete: 'organization', validate: required('Business name') },
-      {
-        name: 'business.businessRegistrationNo',
-        label: 'Business registration number',
-        validate: (v) =>
-          /^[A-Z0-9][A-Z0-9 /-]{2,29}$/.test(v.trim().toUpperCase()) ? undefined : 'Enter a valid business registration number',
-      },
-      { name: 'business.businessPhone', label: 'Business phone', type: 'tel', validate: phoneRule },
-      { name: 'business.businessEmail', label: 'Business email', type: 'email', validate: emailRule },
-      { name: 'business.businessAddress', label: 'Business address', multiline: true, wide: true, validate: required('Business address', 5) },
-    ],
-  },
-  {
-    title: 'Bank details',
-    fields: [
-      { name: 'bank.bankName', label: 'Bank name', validate: required('Bank name') },
-      { name: 'bank.branch', label: 'Branch', validate: required('Branch') },
-      { name: 'bank.accountHolderName', label: 'Account holder name', validate: required('Account holder name', 3) },
-      {
-        name: 'bank.accountNumber',
-        label: 'Account number',
-        autoComplete: 'off',
-        hint: 'Stored encrypted. Used only for commission payouts.',
-        validate: (v) => (/^\d{6,20}$/.test(strip(v)) ? undefined : 'Account number must be 6-20 digits'),
-      },
-    ],
-  },
-  {
-    title: 'Account & review',
-    fields: [
-      {
-        name: 'password',
-        label: 'Password',
-        type: 'password',
-        autoComplete: 'new-password',
-        hint: 'At least 10 characters with upper case, lower case and a number',
-        validate: (v) =>
-          v.length >= 10 && /[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)
-            ? undefined
-            : 'Use at least 10 characters with upper case, lower case and a number',
-      },
-      {
-        name: 'confirmPassword',
-        label: 'Confirm password',
-        type: 'password',
-        autoComplete: 'new-password',
-        validate: (v, all) => (v && v === all.password ? undefined : 'Passwords do not match'),
-      },
-    ],
-  },
-]
-
-const ALL_FIELDS = STEPS.flatMap((s) => s.fields)
-
-function toPayload(values: Values, acceptTerms: boolean) {
-  const payload: Record<string, unknown> = { acceptTerms }
-  for (const [key, value] of Object.entries(values)) {
-    const [group, field] = key.split('.')
-    if (field) {
-      payload[group] = { ...(payload[group] as object), [field]: value }
-    } else {
-      payload[group] = value
-    }
-  }
-  return payload
-}
-
-function maskAccount(v: string) {
-  const digits = strip(v)
-  return digits.length > 4 ? `•••• ${digits.slice(-4)}` : digits
-}
 
 export default function RegisterPage() {
   const router = useRouter()
-  const [step, setStep] = useState(0)
-  const [values, setValues] = useState<Values>(() => Object.fromEntries(ALL_FIELDS.map((f) => [f.name, ''])))
-  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  // Form state
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [phone, setPhone] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [acceptTerms, setAcceptTerms] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+
+  // Registration success state (Check your email screen)
+
+  // Validation & feedback state
+  const [errors, setErrors] = useState<{
+    name?: string
+    email?: string
+    phone?: string
+    password?: string
+    confirmPassword?: string
+    acceptTerms?: string
+  }>({})
   const [formError, setFormError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
-  const onChange = (name: string, value: string) => {
-    setValues((prev) => ({ ...prev, [name]: value }))
-    if (errors[name]) setErrors((prev) => ({ ...prev, [name]: '' }))
-  }
+  const validate = () => {
+    const nextErrors: typeof errors = {}
+    const trimmedName = name.trim()
+    const trimmedEmail = email.trim()
 
-  const validateStep = (index: number) => {
-    const stepErrors: Record<string, string> = {}
-    for (const f of STEPS[index].fields) {
-      const err = f.validate(values[f.name] ?? '', values)
-      if (err) stepErrors[f.name] = err
+    if (!trimmedName || trimmedName.length < 2) {
+      nextErrors.name = 'Full name is required (at least 2 characters).'
     }
-    setErrors((prev) => ({ ...prev, ...stepErrors }))
-    return Object.keys(stepErrors).length === 0
+
+    if (!trimmedEmail) {
+      nextErrors.email = 'Email address is required.'
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      nextErrors.email = 'Please enter a valid email address.'
+    }
+
+    const phoneDigits = phone.replace(/[\s\-().]/g, '')
+    if (!phoneDigits) {
+      nextErrors.phone = 'Mobile number is required.'
+    } else if (!/^(\+94|0094|0)?7\d{8}$/.test(phoneDigits)) {
+      nextErrors.phone = 'Enter a valid Sri Lankan mobile number, e.g. 0771234567.'
+    }
+
+    if (!password) {
+      nextErrors.password = 'Password is required.'
+    } else if (password.length < 10 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+      nextErrors.password = 'Password must be at least 10 characters with uppercase, lowercase and a number.'
+    }
+
+    if (!confirmPassword) {
+      nextErrors.confirmPassword = 'Confirm password is required.'
+    } else if (password !== confirmPassword) {
+      nextErrors.confirmPassword = 'Passwords do not match.'
+    }
+
+    if (!acceptTerms) {
+      nextErrors.acceptTerms = 'You must accept the terms and conditions to create an account.'
+    }
+
+    setErrors(nextErrors)
+    return Object.keys(nextErrors).length === 0
   }
 
-  const next = () => {
-    if (validateStep(step)) setStep((s) => s + 1)
-  }
-
-  const submit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setFormError(null)
-    if (step < STEPS.length - 1) return next()
-    if (!STEPS.every((_, i) => validateStep(i))) return
-    if (!acceptTerms) {
-      setFormError('You must accept the reseller terms to continue.')
-      return
-    }
+
+    if (!validate()) return
 
     setSubmitting(true)
     try {
-      const result = await api<{ code: string; email: string }>('/reseller-registration', {
+      const response = await api<{
+        message?: string
+        email?: string
+        codeSent?: boolean
+      }>('/auth/register', {
         method: 'POST',
-        body: JSON.stringify(toPayload(values, acceptTerms)),
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim().toLowerCase(),
+          phone: phone.trim(),
+          password,
+          confirmPassword,
+          acceptTerms,
+        }),
       })
-      sessionStorage.setItem('hxr_application', JSON.stringify(result))
-      router.push('/register/submitted')
+
+      // Account created and an SMS code sent; redirect to the OTP entry page
+      const targetEmail = response.email || email.trim().toLowerCase()
+      // The account exists either way; when the SMS could not be sent, the verification page explains and offers a resend.
+      const unsent = response.codeSent === false ? '&sent=0' : ''
+      router.push(`/verify-email?email=${encodeURIComponent(targetEmail)}${unsent}`)
     } catch (err) {
       if (err instanceof ApiError) {
-        const fieldErrors = err.fieldErrors()
-        setErrors(fieldErrors)
-        const firstStep = STEPS.findIndex((s) => s.fields.some((f) => fieldErrors[f.name]))
-        if (firstStep >= 0) setStep(firstStep)
-        setFormError(err.message === 'Validation error' ? 'Please correct the highlighted fields.' : err.message)
+        setFormError(err.message || 'Registration failed. Please check the information provided.')
       } else {
         setFormError('Could not reach the server. Please try again.')
       }
@@ -178,88 +125,247 @@ export default function RegisterPage() {
     }
   }
 
-  const current = STEPS[step]
-
   return (
-    <main className="container narrow">
-      <h1>Become a Hexalyte reseller</h1>
-      <p className="muted">
-        Submit your application. Our team will review it and you can log in once it has been approved.
-      </p>
+    <AuthLayout ariaLabel="Register Account">
 
-      <div className="steps">
-        {STEPS.map((s, i) => (
-          <div key={s.title} className={`step ${i === step ? 'active' : i < step ? 'done' : ''}`}>
-            {i + 1}. {s.title}
+          <h1 className="login-form-heading">Create Account</h1>
+          <p className="login-form-subtitle">Register to start your journey as a partner partner.</p>
+
+      {/* Error Notice */}
+      {formError && (
+        <div className="login-notice error" role="alert">
+          <div className="login-notice-icon">
+            <AlertCircle size={18} />
           </div>
-        ))}
-      </div>
+          <div className="login-notice-content">
+            <strong>Registration Incomplete</strong>
+            {formError}
+          </div>
+        </div>
+      )}
 
-      <form className="card" onSubmit={submit} noValidate>
-        <h2>{current.title}</h2>
-        {formError && <div className="alert error">{formError}</div>}
-
-        <div className="grid-2">
-          {current.fields.map((f) => (
-            <Field
-              key={f.name}
-              name={f.name}
-              label={f.label}
-              type={f.type ?? 'text'}
-              hint={f.hint}
-              multiline={f.multiline}
-              autoComplete={f.autoComplete}
-              className={f.wide ? 'span-2' : undefined}
-              value={values[f.name]}
-              error={errors[f.name]}
-              onChange={onChange}
+      <form onSubmit={handleSubmit} noValidate>
+        {/* Full Name */}
+        <div className="login-field">
+          <label htmlFor="register-name" className="login-field-label">
+            Full Name
+          </label>
+          <div className="login-field-input-wrap">
+            <span className="login-field-icon">
+              <User size={18} />
+            </span>
+            <input
+              id="register-name"
+              type="text"
+              name="name"
+              autoComplete="name"
+              placeholder="e.g. Ruwan Jayawardena"
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value)
+                if (errors.name) setErrors((prev) => ({ ...prev, name: undefined }))
+              }}
+              className={`login-field-input ${errors.name ? 'has-error' : ''}`}
+              disabled={submitting}
+              required
             />
-          ))}
+          </div>
+          {errors.name && <div className="login-field-error">{errors.name}</div>}
         </div>
 
-        {step === STEPS.length - 1 && (
-          <>
-            <h2>Review</h2>
-            <dl className="details" style={{ marginBottom: '1rem' }}>
-              <dt>Full name</dt>
-              <dd>{values['personal.fullName']}</dd>
-              <dt>NIC / Passport</dt>
-              <dd>{values['personal.nicOrPassport']}</dd>
-              <dt>Email</dt>
-              <dd>{values['personal.email']}</dd>
-              <dt>Business</dt>
-              <dd>
-                {values['business.businessName']} ({values['business.businessRegistrationNo']})
-              </dd>
-              <dt>Bank account</dt>
-              <dd>
-                {values['bank.bankName']} – {values['bank.branch']}, {values['bank.accountHolderName']},{' '}
-                <span className="mono">{maskAccount(values['bank.accountNumber'])}</span>
-              </dd>
-            </dl>
-            <label className="row small" style={{ marginBottom: '1rem' }}>
-              <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} />
-              I confirm these details are accurate and accept the Hexalyte reseller terms.
-            </label>
-          </>
-        )}
+        {/* Email Address */}
+        <div className="login-field">
+          <label htmlFor="register-email" className="login-field-label">
+            Email Address
+          </label>
+          <div className="login-field-input-wrap">
+            <span className="login-field-icon">
+              <Mail size={18} />
+            </span>
+            <input
+              id="register-email"
+              type="email"
+              name="email"
+              autoComplete="email"
+              placeholder="name@business.com"
+              value={email}
+              onChange={(e) => {
+                setEmail(e.target.value)
+                if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }))
+              }}
+              className={`login-field-input ${errors.email ? 'has-error' : ''}`}
+              disabled={submitting}
+              required
+            />
+          </div>
+          {errors.email && <div className="login-field-error">{errors.email}</div>}
+        </div>
 
-        <div className="row">
-          {step > 0 && (
-            <button type="button" className="btn secondary" onClick={() => setStep((s) => s - 1)} disabled={submitting}>
-              Back
-            </button>
+        {/* Mobile number: receives the SMS verification code */}
+        <div className="login-field">
+          <label htmlFor="register-phone" className="login-field-label">
+            Mobile Number
+          </label>
+          <div className="login-field-input-wrap">
+            <span className="login-field-icon">
+              <Phone size={18} />
+            </span>
+            <input
+              id="register-phone"
+              type="tel"
+              name="phone"
+              autoComplete="tel"
+              inputMode="tel"
+              placeholder="0771234567"
+              value={phone}
+              onChange={(e) => {
+                setPhone(e.target.value)
+                if (errors.phone) setErrors((prev) => ({ ...prev, phone: undefined }))
+              }}
+              className={`login-field-input ${errors.phone ? 'has-error' : ''}`}
+              disabled={submitting}
+              required
+            />
+          </div>
+          {errors.phone ? (
+            <div className="login-field-error">{errors.phone}</div>
+          ) : (
+            <div className="login-field-hint" style={{ fontSize: '0.78rem', opacity: 0.75, marginTop: '0.3rem' }}>
+              We will text a 6-digit verification code to this number.
+            </div>
           )}
-          <span className="spacer" />
-          <button type="submit" className="btn" disabled={submitting}>
-            {step < STEPS.length - 1 ? 'Continue' : submitting ? 'Submitting…' : 'Submit application'}
-          </button>
         </div>
+
+        {/* Password */}
+        <div className="login-field">
+          <label htmlFor="register-password" className="login-field-label">
+            Password
+          </label>
+          <div className="login-field-input-wrap">
+            <span className="login-field-icon">
+              <Lock size={18} />
+            </span>
+            <input
+              id="register-password"
+              type={showPassword ? 'text' : 'password'}
+              name="password"
+              autoComplete="new-password"
+              placeholder="At least 10 characters"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value)
+                if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }))
+              }}
+              className={`login-field-input ${errors.password ? 'has-error' : ''}`}
+              disabled={submitting}
+              required
+            />
+            <button
+              type="button"
+              className="login-pw-toggle"
+              onClick={() => setShowPassword(!showPassword)}
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
+              aria-pressed={showPassword}
+            >
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
+          {errors.password && <div className="login-field-error">{errors.password}</div>}
+        </div>
+
+        {/* Confirm Password */}
+        <div className="login-field">
+          <label htmlFor="register-confirm-password" className="login-field-label">
+            Confirm Password
+          </label>
+          <div className="login-field-input-wrap">
+            <span className="login-field-icon">
+              <Lock size={18} />
+            </span>
+            <input
+              id="register-confirm-password"
+              type={showConfirmPassword ? 'text' : 'password'}
+              name="confirmPassword"
+              autoComplete="new-password"
+              placeholder="Re-enter your password"
+              value={confirmPassword}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value)
+                if (errors.confirmPassword) setErrors((prev) => ({ ...prev, confirmPassword: undefined }))
+              }}
+              className={`login-field-input ${errors.confirmPassword ? 'has-error' : ''}`}
+              disabled={submitting}
+              required
+            />
+            <button
+              type="button"
+              className="login-pw-toggle"
+              onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+              aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+              aria-pressed={showConfirmPassword}
+            >
+              {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
+          {errors.confirmPassword && <div className="login-field-error">{errors.confirmPassword}</div>}
+        </div>
+
+        {/* Terms and Conditions Checkbox */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label className="register-terms-label" style={{ marginBottom: 0 }}>
+            <input
+              type="checkbox"
+              checked={acceptTerms}
+              onChange={(e) => {
+                setAcceptTerms(e.target.checked)
+                if (errors.acceptTerms) setErrors((prev) => ({ ...prev, acceptTerms: undefined }))
+              }}
+              disabled={submitting}
+            />
+            <span>
+              I accept the{' '}
+              <a href="#" onClick={(e) => e.preventDefault()}>
+                Hexalyte Innovation Terms and Conditions
+              </a>{' '}
+              and Privacy Policy.
+            </span>
+          </label>
+          {errors.acceptTerms && (
+            <div className="login-field-error" style={{ marginTop: '0.4rem' }}>
+              {errors.acceptTerms}
+            </div>
+          )}
+        </div>
+
+        {/* Submit Button */}
+        <button
+          type="submit"
+          className="login-submit"
+          disabled={submitting}
+        >
+          {submitting ? (
+            <>
+              <span className="login-spinner" aria-hidden="true" />
+              <span>Creating Account...</span>
+            </>
+          ) : (
+            <>
+              <span>Create Account</span>
+              <ArrowRight size={18} />
+            </>
+          )}
+        </button>
       </form>
 
-      <p className="muted small">
-        Already registered? <Link href="/login">Log in</Link>
-      </p>
-    </main>
+      {/* Divider */}
+      <div className="login-divider">Already have an account?</div>
+
+          <div className="login-register-cta">
+            <Link href="/login" className="login-register-btn">
+              <span>Sign In to Existing Account</span>
+              <ArrowRight size={16} />
+            </Link>
+          </div>
+    </AuthLayout>
   )
 }

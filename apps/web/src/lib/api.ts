@@ -24,20 +24,73 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Where the session lives is the user's "Remember me" choice at login:
+ * - checked   → localStorage (survives closing the browser; same as before this option existed)
+ * - unchecked → sessionStorage (gone when the tab/window is closed)
+ *
+ * Only the short-lived access token and the rotating refresh token are ever stored — never a
+ * password. The backend is unchanged: its refresh token keeps its normal server-side lifetime,
+ * but an unchecked session simply never persists it in the browser past the tab.
+ * Reads check sessionStorage first, then localStorage, so sessions created before this option
+ * existed (localStorage) keep working.
+ */
+function store(kind: 'local' | 'session'): Storage | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return kind === 'local' ? window.localStorage : window.sessionStorage
+  } catch {
+    return null // storage blocked (private mode / policy): behave as logged-out rather than throwing
+  }
+}
+
+function read(key: string): string | null {
+  for (const kind of ['session', 'local'] as const) {
+    try {
+      const value = store(kind)?.getItem(key)
+      if (value) return value
+    } catch {
+      /* ignore */
+    }
+  }
+  return null
+}
+
 export const tokens = {
   get access() {
-    return typeof window === 'undefined' ? null : localStorage.getItem(ACCESS_KEY)
+    return read(ACCESS_KEY)
   },
   get refresh() {
-    return typeof window === 'undefined' ? null : localStorage.getItem(REFRESH_KEY)
+    return read(REFRESH_KEY)
   },
-  set(access: string, refresh: string) {
-    localStorage.setItem(ACCESS_KEY, access)
-    localStorage.setItem(REFRESH_KEY, refresh)
+  /** True when the current session was started without "Remember me" (tab-lifetime only). */
+  get isSessionOnly() {
+    try {
+      return Boolean(store('session')?.getItem(REFRESH_KEY))
+    } catch {
+      return false
+    }
+  },
+  /**
+   * `remember` is passed at login. Token rotation (refresh) omits it so the session stays in
+   * whichever store it started in.
+   */
+  set(access: string, refresh: string, remember?: boolean) {
+    const sessionOnly = remember === undefined ? this.isSessionOnly : !remember
+    const target = store(sessionOnly ? 'session' : 'local')
+    const other = store(sessionOnly ? 'local' : 'session')
+    if (!target) return
+    target.setItem(ACCESS_KEY, access)
+    target.setItem(REFRESH_KEY, refresh)
+    other?.removeItem(ACCESS_KEY)
+    other?.removeItem(REFRESH_KEY)
   },
   clear() {
-    localStorage.removeItem(ACCESS_KEY)
-    localStorage.removeItem(REFRESH_KEY)
+    for (const kind of ['session', 'local'] as const) {
+      const s = store(kind)
+      s?.removeItem(ACCESS_KEY)
+      s?.removeItem(REFRESH_KEY)
+    }
   },
 }
 
@@ -50,6 +103,11 @@ interface Envelope<T> {
   meta?: { total: number; page: number; limit: number; totalPages: number; [k: string]: unknown }
 }
 
+/** Endpoints that must never trigger the refresh-and-retry loop. */
+const NO_REFRESH_PATHS = ['/auth/login', '/auth/refresh', '/auth/logout']
+
+const canRefresh = (path: string) => !NO_REFRESH_PATHS.some((p) => path === p || path.startsWith(`${p}?`))
+
 let refreshing: Promise<boolean> | null = null
 
 async function tryRefresh(): Promise<boolean> {
@@ -61,8 +119,15 @@ async function tryRefresh(): Promise<boolean> {
     body: JSON.stringify({ refreshToken }),
   })
     .then(async (res) => {
-      if (!res.ok) return false
+      if (!res.ok) {
+        tokens.clear()
+        return false
+      }
       const body = (await res.json()) as Envelope<{ accessToken: string; refreshToken: string }>
+      if (!body?.data?.accessToken) {
+        tokens.clear()
+        return false
+      }
       tokens.set(body.data.accessToken, body.data.refreshToken)
       return true
     })
@@ -81,7 +146,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retry 
 
   const res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: 'no-store' })
 
-  if (res.status === 401 && retry && tokens.refresh && !path.startsWith('/auth/')) {
+  if (res.status === 401 && retry && tokens.refresh && canRefresh(path)) {
     if (await tryRefresh()) return apiRequest<T>(path, init, false)
     tokens.clear()
   }

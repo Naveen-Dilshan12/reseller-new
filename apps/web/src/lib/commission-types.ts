@@ -28,7 +28,16 @@ export interface CommissionSummary {
     nextLevel: { level: number; name: string; ratePercent: string; customersNeeded: number } | null
   }
   levels: CommissionLevel[]
-  commissionPerCustomer: { product: string; productCode: string; baseAmount: string; currency: string; amount: string }[]
+  /** Per product at the current level: `amount` is the reseller's commission, `hexalyteAmount` what Hexalyte keeps. */
+  commissionPerCustomer: {
+    product: string
+    productCode: string
+    baseAmount: string
+    currency: string
+    ratePercent: string
+    amount: string
+    hexalyteAmount: string
+  }[]
   totals: StatusTotals
   currentMonth: { periodMonth: string; earnings: string }
   monthlyEarnings: { periodMonth: string; earnings: string }[]

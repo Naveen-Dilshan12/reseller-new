@@ -53,7 +53,7 @@ export function OwnerFields({ value, errors, onChange, lockBusinessName }: Props
         />
       </div>
       <p className="small muted" style={{ marginTop: 0 }}>
-        These details go straight to the SaaS to create the owner account. The reseller platform does not keep them.
+        These details go straight to the SaaS to create the owner account. The partner platform does not keep them.
       </p>
     </>
   )

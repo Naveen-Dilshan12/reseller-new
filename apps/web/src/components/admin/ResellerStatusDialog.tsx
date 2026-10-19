@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { api, ApiError } from '@/lib/api'
+import { Modal } from '@/components/ui/Modal'
 
 interface Props {
   reseller: { id: string; businessName: string; code: string }
@@ -35,15 +36,14 @@ export function ResellerStatusDialog({ reseller, action, onClose, onDone }: Prop
   }
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal">
+    <Modal label={`${suspend ? 'Suspend' : 'Reactivate'} ${reseller.businessName}`} onClose={onClose}>
         <h2>
           {suspend ? 'Suspend' : 'Reactivate'} {reseller.businessName}
         </h2>
         <p className="small muted">
           {suspend
-            ? 'All reseller users are logged out and cannot sign in or submit requests. Their customers’ SaaS accounts and existing commissions are not affected.'
-            : 'The reseller’s users can sign in again immediately.'}
+            ? 'All partner users are logged out and cannot sign in or submit requests. Their customers’ SaaS accounts and existing commissions are not affected.'
+            : 'The partner’s users can sign in again immediately.'}
         </p>
         <div className="field">
           <label htmlFor="rs-text">{suspend ? 'Reason (internal)' : 'Note (optional)'}</label>
@@ -56,10 +56,9 @@ export function ResellerStatusDialog({ reseller, action, onClose, onDone }: Prop
             Cancel
           </button>
           <button className={`btn ${suspend ? 'danger' : 'success'}`} onClick={submit} disabled={busy}>
-            {busy ? 'Saving…' : suspend ? 'Suspend reseller' : 'Reactivate'}
+            {busy ? 'Saving…' : suspend ? 'Suspend partner' : 'Reactivate'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

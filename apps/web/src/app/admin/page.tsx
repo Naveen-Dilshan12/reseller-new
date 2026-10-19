@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { api, ApiError } from '@/lib/api'
+import { api, apiRequest, ApiError } from '@/lib/api'
 import { useAdminUser } from '@/lib/admin-context'
 import { formatDate, formatMoney, monthLabel } from '@/lib/format'
 import { ACTIVATION_STATUS_LABELS } from '@/lib/activation-types'
 import { humanizeAction, type AdminDashboard } from '@/lib/admin-types'
+import type { DemoPipelineCounts } from '@/lib/demo-types'
 
 interface ModernKpiProps {
   label: string
@@ -23,16 +24,20 @@ function ModernKpi({ label, value, hint, href, icon, iconBg, accentColor }: Mode
     <div
       style={{
         background: '#0f1523',
-        borderRadius: '16px',
-        padding: '1.35rem 1.45rem',
+        borderRadius: '14px',
+        padding: '0.95rem 1.1rem',
         border: '1px solid rgba(255, 255, 255, 0.08)',
-        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.4)',
+        boxShadow: '0 4px 16px rgba(0, 0, 0, 0.35)',
         display: 'flex',
         flexDirection: 'column',
-        gap: '0.45rem',
+        gap: '0.3rem',
         transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
         position: 'relative',
         overflow: 'hidden',
+        // Every tile fills its grid cell, so a row of tiles is always the same height.
+        height: '100%',
+        minHeight: '6.6rem',
+        boxSizing: 'border-box',
       }}
     >
       {accentColor && (
@@ -52,7 +57,7 @@ function ModernKpi({ label, value, hint, href, icon, iconBg, accentColor }: Mode
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span
           style={{
-            fontSize: '0.74rem',
+            fontSize: '0.7rem',
             fontWeight: 700,
             textTransform: 'uppercase',
             letterSpacing: '0.05em',
@@ -63,9 +68,9 @@ function ModernKpi({ label, value, hint, href, icon, iconBg, accentColor }: Mode
         </span>
         <div
           style={{
-            width: '38px',
-            height: '38px',
-            borderRadius: '11px',
+            width: '32px',
+            height: '32px',
+            borderRadius: '9px',
             background: iconBg,
             display: 'flex',
             alignItems: 'center',
@@ -79,18 +84,22 @@ function ModernKpi({ label, value, hint, href, icon, iconBg, accentColor }: Mode
 
       <div
         style={{
-          fontSize: '1.85rem',
+          // Money values ("Rs. 12,345.00") are long; keep them on one line inside narrower tiles.
+          fontSize: typeof value === 'string' && value.length > 8 ? 'clamp(1.1rem, 0.7rem + 0.9vw, 1.35rem)' : '1.5rem',
           fontWeight: 800,
-          color: '#ffffff',
+          // The tile is dark in both themes, so its text is a fixed light colour: --text-heading is dark in Light mode.
+          color: '#f8fafc',
           letterSpacing: '-0.03em',
           lineHeight: 1.15,
+          fontVariantNumeric: 'tabular-nums',
+          overflowWrap: 'anywhere',
         }}
       >
         {value}
       </div>
 
       {hint && (
-        <div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 500 }}>
+        <div style={{ fontSize: '0.74rem', color: '#94a3b8', fontWeight: 500, marginTop: 'auto', paddingTop: '0.1rem' }}>
           {hint}
         </div>
       )}
@@ -99,7 +108,7 @@ function ModernKpi({ label, value, hint, href, icon, iconBg, accentColor }: Mode
 
   if (href) {
     return (
-      <Link href={href} style={{ textDecoration: 'none' }}>
+      <Link href={href} style={{ textDecoration: 'none', display: 'block', height: '100%' }}>
         {content}
       </Link>
     )
@@ -112,17 +121,64 @@ const ago = (iso: string) => {
   return days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`
 }
 
+/** Same header for every dashboard panel: icon + title + one-line purpose on the left, a link or chip on the right. */
+function PanelHeader({ icon, title, subtitle, action }: { icon: string; title: string; subtitle: string; action?: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem 1rem', marginBottom: '0.85rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
+        <span style={{ fontSize: '1.05rem' }}>{icon}</span>
+        <div style={{ minWidth: 0 }}>
+          <h3 style={{ margin: 0, fontSize: '1rem' }}>{title}</h3>
+          <p className="muted small" style={{ margin: '0.1rem 0 0', fontSize: '0.78rem' }}>
+            {subtitle}
+          </p>
+        </div>
+      </div>
+      {action}
+    </div>
+  )
+}
+
+const panelLinkStyle: React.CSSProperties = { fontWeight: 600, whiteSpace: 'nowrap' }
+
+/** One list row, shared by the queues and the activity feed so they line up. */
+const rowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  flexWrap: 'wrap',
+  gap: '0.4rem 0.85rem',
+  padding: '0.55rem 0.85rem',
+  borderRadius: '10px',
+  background: 'rgba(255, 255, 255, 0.025)',
+  border: '1px solid rgba(255, 255, 255, 0.06)',
+}
+
+/** Panels in a row share the row height; the body grows so short lists don't leave the card looking cut off. */
+const panelStyle: React.CSSProperties = { margin: 0, padding: '1.1rem 1.25rem', display: 'flex', flexDirection: 'column' }
+
 export default function AdminDashboardPage() {
   const admin = useAdminUser()
   const can = (p: string) => admin.permissions.includes(p)
   const [data, setData] = useState<AdminDashboard | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [demoCounts, setDemoCounts] = useState<DemoPipelineCounts | null>(null)
 
   useEffect(() => {
     api<AdminDashboard>('/dashboard/admin')
       .then(setData)
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'))
   }, [])
+
+  // Total / in-progress demo request counts come from the existing list endpoint's pipeline counts.
+  // Best effort: if it fails, the Demo Requests card still shows the pending count from the dashboard payload.
+  const canReadDemos = can('demos:read')
+  useEffect(() => {
+    if (!canReadDemos) return
+    apiRequest<unknown[]>('/demo-requests?limit=1&page=1')
+      .then((r) => setDemoCounts((r.meta as unknown as { pipelineCounts?: DemoPipelineCounts } | undefined)?.pipelineCounts ?? null))
+      .catch(() => setDemoCounts(null))
+  }, [canReadDemos])
 
   if (error) {
     return (
@@ -143,17 +199,24 @@ export default function AdminDashboardPage() {
   const { kpis, queue, attention, sections } = data
   const money = (v: string) => formatMoney(v, kpis.commission?.currency ?? 'LKR')
   const maxTrend = Math.max(1, ...data.activationTrend.map((t) => t.count))
-  const hasAttention =
-    attention.failedTrials7d > 0 ||
-    attention.integrationErrors.length > 0 ||
-    attention.failedActivations > 0
+  const trendTotal = data.activationTrend.reduce((sum, t) => sum + t.count, 0)
+  // Failed trials are no longer surfaced: the Admin trial list was replaced by Demo Requests, so there is nothing to open.
+  const hasAttention = attention.integrationErrors.length > 0 || attention.failedActivations > 0
+
+  // Demo Requests card: pending count from the dashboard payload; total / in-progress from the list endpoint's counts.
+  const demoPending = sections.pendingDemoRequests ?? demoCounts?.pending ?? 0
+  const demoHint = demoCounts
+    ? `Pending review · ${demoCounts.total} total · ${demoCounts.approved + demoCounts.demoCreated} in progress`
+    : 'Pending review'
+  // Tile count drives the balanced grid (see `.kpi-grid[data-count]` in globals.css).
+  const kpiCount = 5 + (canReadDemos ? 1 : 0) + (kpis.commission ? 2 : 0)
 
   const tiles = [
-    { href: '/admin/resellers', label: 'Resellers', count: sections.resellers, note: `${sections.pendingApplications} pending review`, icon: '👥', permission: 'resellers:read' },
+    { href: '/admin/resellers', label: 'Partners', count: sections.resellers, note: `${sections.pendingApplications} pending review`, icon: '👥', permission: 'resellers:read' },
     { href: '/admin/products', label: 'SaaS Products', count: sections.products, note: 'Catalogue, pricing & partner APIs', icon: '📦', permission: 'products:manage' },
     { href: '/admin/customer-accounts', label: 'Customers & Mapping', count: sections.customers, note: 'Mapped tenants & live status', icon: '🏢', permission: 'accounts:read' },
-    { href: '/admin/trials', label: 'Trial Requests', count: sections.trials, note: 'SaaS provisioning requests', icon: '⚡', permission: 'trials:read' },
     { href: '/admin/activations', label: 'Activation Requests', count: sections.openActivations, note: 'Payment reviews & approvals', icon: '🛡️', permission: 'activations:read' },
+    { href: '/admin/demo-requests', label: 'Demo Requests', count: sections.pendingDemoRequests, note: 'Pending manual demo requests', icon: '🧩', permission: 'demos:read' },
     { href: '/admin/bank-slips', label: 'Bank Slips Register', count: sections.bankSlips, note: 'Encrypted slips storage', icon: '🧾', permission: 'bankslips:read' },
     { href: '/admin/commissions', label: 'Commissions & Payouts', count: null, note: 'Batch approvals & payouts', icon: '💰', permission: 'commissions:read' },
     { href: '/admin/notifications', label: 'Notifications', count: sections.unreadNotifications, note: 'System alerts', icon: '🔔' },
@@ -162,22 +225,27 @@ export default function AdminDashboardPage() {
   ]
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '1.75rem', color: '#ffffff' }}>Platform Overview</h1>
-          <p className="muted small" style={{ margin: '0.25rem 0 0' }}>
-            Hexalyte Central Reseller Operations · {monthLabel(data.period)}
+          <h1 style={{ margin: 0, fontSize: '1.45rem', color: 'var(--text-heading)' }}>Platform Overview</h1>
+          <p className="muted small" style={{ margin: '0.2rem 0 0', fontSize: '0.8rem' }}>
+            Hexalyte Central Partner Operations · {monthLabel(data.period)}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.65rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.65rem' }}>
           <Link href="/admin/activations" className="btn small">
             Review Activations ({kpis.pendingActivations.total})
           </Link>
           <Link href="/admin/reseller-applications" className="btn secondary small">
             Applications ({kpis.pendingApprovals})
           </Link>
+          {canReadDemos && (
+            <Link href="/admin/demo-requests" className="btn secondary small">
+              Demo Requests ({demoPending})
+            </Link>
+          )}
         </div>
       </div>
 
@@ -195,24 +263,13 @@ export default function AdminDashboardPage() {
               {p.name} integration error
             </Link>
           ))}
-          {attention.failedTrials7d > 0 && (
-            <Link href="/admin/trials" style={{ textDecoration: 'underline', marginLeft: '0.5rem' }}>
-              {attention.failedTrials7d} failed trial(s) in last 7 days
-            </Link>
-          )}
         </div>
       )}
 
-      {/* KPI Cards Grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
-          gap: '1.1rem',
-        }}
-      >
+      {/* KPI Cards Grid: existing .kpi-grid rules keep rows full (4 + 4 wide, 2 per row on tablet, 1 on phones) */}
+      <div className="kpi-grid" data-count={kpiCount} style={{ marginBottom: 0, gap: '0.8rem', gridAutoRows: '1fr' }}>
         <ModernKpi
-          label="Total Resellers"
+          label="Total Partners"
           value={kpis.totalResellers}
           hint={kpis.suspendedResellers ? `${kpis.suspendedResellers} suspended` : 'All verified active'}
           href="/admin/resellers"
@@ -258,19 +315,23 @@ export default function AdminDashboardPage() {
           }
         />
 
-        <ModernKpi
-          label="Trial Accounts"
-          value={kpis.trialAccounts}
-          hint="Currently in free trial"
-          href="/admin/trials"
-          accentColor="#a855f7"
-          iconBg="rgba(168, 85, 247, 0.15)"
-          icon={
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2">
-              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-            </svg>
-          }
-        />
+        {canReadDemos && (
+          <ModernKpi
+            label="Demo Requests"
+            value={demoPending}
+            hint={demoHint}
+            href="/admin/demo-requests"
+            accentColor="#a855f7"
+            iconBg="rgba(168, 85, 247, 0.15)"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M3 9h18" />
+                <path d="m9 15 2 2 4-4" />
+              </svg>
+            }
+          />
+        )}
 
         <ModernKpi
           label="Pending Activations"
@@ -338,50 +399,40 @@ export default function AdminDashboardPage() {
         )}
       </div>
 
-      {/* Middle Operations Panels */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '1.35rem' }}>
+      {/* Work queues: both panels share one header, row style and height */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: '1rem' }}>
         {/* Queue 1: Activations to Handle */}
         {queue.activations && (
-          <div className="card" style={{ margin: 0, padding: '1.4rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.15rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <span style={{ fontSize: '1.2rem' }}>🛡️</span>
-                <h3 style={{ margin: 0 }}>Activation Requests to Handle</h3>
-              </div>
-              <Link href="/admin/activations" className="small" style={{ fontWeight: 600 }}>
-                View all ({queue.activations.length})
-              </Link>
-            </div>
+          <div className="card" style={panelStyle}>
+            <PanelHeader
+              icon="🛡️"
+              title="Activation Requests to Handle"
+              subtitle="Payment reviews & approvals waiting on you"
+              action={
+                <Link href="/admin/activations" className="small" style={panelLinkStyle}>
+                  View all ({kpis.pendingActivations.total})
+                </Link>
+              }
+            />
 
             {queue.activations.length === 0 ? (
-              <p className="muted small" style={{ padding: '1.5rem 0', textAlign: 'center' }}>
+              <p className="muted small" style={{ margin: 'auto 0', padding: '1rem 0', textAlign: 'center' }}>
                 All clear! No activation requests waiting for review.
               </p>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
                 {queue.activations.map((a) => (
-                  <div
-                    key={a.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '0.85rem 1rem',
-                      borderRadius: '12px',
-                      background: 'rgba(255, 255, 255, 0.025)',
-                      border: '1px solid rgba(255, 255, 255, 0.06)',
-                    }}
-                  >
-                    <div>
-                      <Link href={`/admin/activations/${a.id}`} style={{ fontWeight: 700, color: '#ffffff' }}>
+                  <div key={a.id} style={rowStyle}>
+                    <div style={{ minWidth: 0, flex: '1 1 14rem' }}>
+                      <Link href={`/admin/activations/${a.id}`} style={{ fontWeight: 700, color: 'var(--text-heading)' }}>
                         {a.customerAccount.customer.displayName}
                       </Link>
-                      <div className="muted small" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.2rem' }}>
+                      <div className="muted small" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.15rem 0.5rem', alignItems: 'center', marginTop: '0.2rem' }}>
                         <span className="mono">{a.reference}</span>
                         <span>·</span>
                         <span>{a.product.name}</span>
                         <span>·</span>
-                        <strong style={{ color: '#34d399' }}>{formatMoney(a.amount, a.currency)}</strong>
+                        <strong className="admin-dash-amount">{formatMoney(a.amount, a.currency)}</strong>
                       </div>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem' }}>
@@ -395,40 +446,30 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
-        {/* Queue 2: Reseller Applications */}
+        {/* Queue 2: Partner Applications */}
         {queue.applications && (
-          <div className="card" style={{ margin: 0, padding: '1.4rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.15rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <span style={{ fontSize: '1.2rem' }}>📝</span>
-                <h3 style={{ margin: 0 }}>Pending Reseller Applications</h3>
-              </div>
-              <Link href="/admin/reseller-applications" className="small" style={{ fontWeight: 600 }}>
-                View all ({queue.applications.length})
-              </Link>
-            </div>
+          <div className="card" style={panelStyle}>
+            <PanelHeader
+              icon="📝"
+              title="Pending Partner Applications"
+              subtitle="KYC reviews waiting on you"
+              action={
+                <Link href="/admin/reseller-applications" className="small" style={panelLinkStyle}>
+                  View all ({kpis.pendingApprovals})
+                </Link>
+              }
+            />
 
             {queue.applications.length === 0 ? (
-              <p className="muted small" style={{ padding: '1.5rem 0', textAlign: 'center' }}>
-                No reseller applications waiting for approval.
+              <p className="muted small" style={{ margin: 'auto 0', padding: '1rem 0', textAlign: 'center' }}>
+                No partner applications waiting for approval.
               </p>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
                 {queue.applications.map((r) => (
-                  <div
-                    key={r.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '0.85rem 1rem',
-                      borderRadius: '12px',
-                      background: 'rgba(255, 255, 255, 0.025)',
-                      border: '1px solid rgba(255, 255, 255, 0.06)',
-                    }}
-                  >
-                    <div>
-                      <Link href={`/admin/reseller-applications/${r.id}`} style={{ fontWeight: 700, color: '#ffffff' }}>
+                  <div key={r.id} style={rowStyle}>
+                    <div style={{ minWidth: 0, flex: '1 1 14rem' }}>
+                      <Link href={`/admin/reseller-applications/${r.id}`} style={{ fontWeight: 700, color: 'var(--text-heading)' }}>
                         {r.businessName}
                       </Link>
                       <div className="muted small" style={{ marginTop: '0.2rem' }}>
@@ -449,43 +490,43 @@ export default function AdminDashboardPage() {
         )}
       </div>
 
-      {/* Visual Chart & Activity Feed */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '1.35rem' }}>
+      {/* Trend & activity: same header and card treatment; the trend bars spread to match the feed's height */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: '1rem' }}>
         {/* Subscription Activations Trend Chart */}
-        <div className="card" style={{ margin: 0, padding: '1.45rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.35rem' }}>
-            <div>
-              <h3 style={{ margin: 0 }}>Subscription Activations Trend</h3>
-              <p className="muted small" style={{ margin: '0.2rem 0 0' }}>Verified monthly payments (Last 6 months)</p>
-            </div>
-            <span
-              style={{
-                fontSize: '0.76rem',
-                fontWeight: 700,
-                color: '#818cf8',
-                background: 'rgba(99, 102, 241, 0.15)',
-                border: '1px solid rgba(99, 102, 241, 0.3)',
-                padding: '0.25rem 0.65rem',
-                borderRadius: '8px',
-              }}
-            >
-              Peak: {maxTrend} / mo
-            </span>
-          </div>
+        <div className="card" style={panelStyle}>
+          <PanelHeader
+            icon="📈"
+            title="Subscription Activations Trend"
+            subtitle="Verified monthly payments (Last 6 months)"
+            action={
+              <span
+                className="admin-dash-chip"
+                style={{
+                  fontSize: '0.76rem',
+                  fontWeight: 700,
+                  padding: '0.25rem 0.65rem',
+                  borderRadius: '8px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Peak: {maxTrend} / mo
+              </span>
+            }
+          />
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-around', gap: '0.55rem' }}>
             {data.activationTrend.map((t) => {
               const pct = Math.round((t.count / maxTrend) * 100)
               return (
                 <div key={t.periodMonth} style={{ display: 'flex', alignItems: 'center', gap: '0.9rem' }}>
-                  <span style={{ width: '85px', fontSize: '0.84rem', fontWeight: 600, color: '#94a3b8' }}>
+                  <span style={{ width: '85px', flexShrink: 0, fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                     {monthLabel(t.periodMonth)}
                   </span>
                   <div
                     style={{
                       flex: 1,
-                      height: '20px',
-                      background: 'rgba(255, 255, 255, 0.05)',
+                      height: '14px',
+                      background: 'var(--toggle-bg)',
                       borderRadius: '9999px',
                       overflow: 'hidden',
                       position: 'relative',
@@ -502,54 +543,63 @@ export default function AdminDashboardPage() {
                       }}
                     />
                   </div>
-                  <span style={{ width: '45px', textAlign: 'right', fontWeight: 700, fontSize: '0.9rem', color: '#ffffff' }}>
+                  <span style={{ width: '45px', flexShrink: 0, textAlign: 'right', fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-heading)' }}>
                     {t.count}
                   </span>
                 </div>
               )
             })}
           </div>
+
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '0.5rem 1rem',
+              marginTop: '0.9rem',
+              paddingTop: '0.75rem',
+              borderTop: '1px solid var(--border)',
+            }}
+          >
+            <span className="muted small">
+              This month <strong style={{ color: 'var(--text-heading)' }}>{kpis.monthlyActivations}</strong>
+            </span>
+            <span className="muted small">
+              6-month total <strong style={{ color: 'var(--text-heading)' }}>{trendTotal}</strong>
+            </span>
+          </div>
         </div>
 
         {/* Recent Admin Activity */}
         {data.recentAudit && (
-          <div className="card" style={{ margin: 0, padding: '1.45rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.35rem' }}>
-              <div>
-                <h3 style={{ margin: 0 }}>Recent Platform Activity</h3>
-                <p className="muted small" style={{ margin: '0.2rem 0 0' }}>Tamper-proof append-only audit trail</p>
-              </div>
-              <Link href="/admin/audit-logs" className="small" style={{ fontWeight: 600 }}>
-                Full Audit Log
-              </Link>
-            </div>
+          <div className="card" style={panelStyle}>
+            <PanelHeader
+              icon="📜"
+              title="Recent Platform Activity"
+              subtitle="Tamper-proof append-only audit trail"
+              action={
+                <Link href="/admin/audit-logs" className="small" style={panelLinkStyle}>
+                  Full Audit Log
+                </Link>
+              }
+            />
 
             {data.recentAudit.length === 0 ? (
-              <p className="muted small" style={{ padding: '1.5rem 0', textAlign: 'center' }}>No activity logged yet.</p>
+              <p className="muted small" style={{ margin: 'auto 0', padding: '1rem 0', textAlign: 'center' }}>No activity logged yet.</p>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
                 {data.recentAudit.map((a) => (
-                  <div
-                    key={a.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '0.75rem 0.95rem',
-                      borderRadius: '10px',
-                      background: 'rgba(255, 255, 255, 0.025)',
-                      border: '1px solid rgba(255, 255, 255, 0.06)',
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.88rem', color: '#ffffff' }}>
+                  <div key={a.id} style={rowStyle}>
+                    <div style={{ minWidth: 0, flex: '1 1 10rem' }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-heading)' }}>
                         {humanizeAction(a.action)}
                       </div>
-                      <div className="muted small" style={{ fontSize: '0.78rem' }}>
+                      <div className="muted small" style={{ fontSize: '0.78rem', overflowWrap: 'anywhere' }}>
                         {a.actorEmail ?? a.actorType.toLowerCase()}
                       </div>
                     </div>
-                    <span className="muted small" style={{ fontSize: '0.76rem' }}>
+                    <span className="muted small" style={{ fontSize: '0.76rem', whiteSpace: 'nowrap' }}>
                       {formatDate(a.createdAt)}
                     </span>
                   </div>
@@ -562,12 +612,12 @@ export default function AdminDashboardPage() {
 
       {/* Admin Sections Quick Directory */}
       <div>
-        <h3 style={{ margin: '0.5rem 0 1.1rem', fontSize: '1.2rem', color: '#ffffff' }}>Platform Management Directory</h3>
+        <h3 style={{ margin: '0.25rem 0 0.8rem', fontSize: '1.05rem', color: 'var(--text-heading)' }}>Platform Management Directory</h3>
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-            gap: '0.9rem',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(min(220px, 100%), 1fr))',
+            gap: '0.75rem',
           }}
         >
           {tiles
@@ -579,27 +629,25 @@ export default function AdminDashboardPage() {
                 className="card"
                 style={{
                   margin: 0,
-                  padding: '1.15rem 1.25rem',
+                  padding: '0.75rem 1rem',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.9rem',
+                  gap: '0.75rem',
                   textDecoration: 'none',
                   color: 'inherit',
-                  borderRadius: '14px',
+                  borderRadius: '12px',
                 }}
               >
-                <span style={{ fontSize: '1.6rem' }}>{t.icon}</span>
+                <span style={{ fontSize: '1.3rem' }}>{t.icon}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <strong style={{ fontSize: '0.94rem', color: '#ffffff' }}>{t.label}</strong>
+                    <strong style={{ fontSize: '0.88rem', color: 'var(--text-heading)' }}>{t.label}</strong>
                     {t.count !== null && (
                       <span
+                        className="admin-dash-chip"
                         style={{
                           fontSize: '0.75rem',
                           fontWeight: 800,
-                          background: 'rgba(99, 102, 241, 0.15)',
-                          color: '#818cf8',
-                          border: '1px solid rgba(99, 102, 241, 0.3)',
                           padding: '0.15rem 0.5rem',
                           borderRadius: '6px',
                         }}
