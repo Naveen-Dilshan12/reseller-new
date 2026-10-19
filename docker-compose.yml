@@ -1,3 +1,4 @@
+# DEVELOPMENT ONLY. Publishes on loopback and uses a default dev password. Production uses deploy/docker-compose.prod.yml.
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reseller}
       POSTGRES_DB: ${POSTGRES_DB:-hexalyte_reseller}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - reseller_pg:/var/lib/postgresql/data
     healthcheck:
@@ -28,7 +29,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-4100}:4100"
+      - "127.0.0.1:${BACKEND_PORT:-4100}:4100"
     volumes:
       - reseller_uploads:/app/uploads
 

@@ -1,0 +1,7 @@
+# Real deployment configuration and secrets never belong in git. Only the *.example templates are tracked.
+secrets/
+compose.env
+env.production
+*.dump
+*.dump.tmp
+backups/

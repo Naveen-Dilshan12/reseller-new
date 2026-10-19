@@ -1,0 +1,181 @@
+# Production Compose project for the SAME VPS as other applications. Validated as a scratch project only (see docs/PRODUCTION_READINESS.md); NOT run on the VPS.
+#
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/compose.env <command>
+#
+# Isolation from the other applications on the VPS:
+#   * its own project name, so containers / networks are namespaced "hexalyte-reseller_*" (never join another app's network);
+#   * its own data volumes, declared `external: true`: Compose never creates them (a missing volume is an ERROR instead of a
+#     silently empty database) and `docker compose down -v` can never delete them;
+#   * PostgreSQL publishes NO port at all and sits on an `internal` network with no route out;
+#   * backend / web publish only to a configurable address that defaults to loopback, never 0.0.0.0.
+# One-time, APPROVED operations (not done by this file): create the two volumes, create deploy/secrets/*, create deploy/env.production.
+
+name: hexalyte-reseller
+
+x-common: &common
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  # ------------------------------------------------------------------------------------------------------------------
+  db:
+    <<: *common
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}   # pin by digest when provisioning (needs a registry pull)
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER in compose.env}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in compose.env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    command:
+      - postgres
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-50}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    # NOTE: deliberately no `ports:`. Only containers on the internal network can reach the database.
+    mem_limit: ${DB_MEM_LIMIT:-1g}
+    cpus: ${DB_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ------------------------------------------------------------------------------------------------------------------
+  backend:
+    <<: *common
+    image: hexalyte/reseller-backend:${APP_VERSION:?set APP_VERSION in compose.env}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+      target: runtime
+    env_file:
+      - path: ./env.production            # server-local, git-ignored; template: deploy/env.production.example
+        required: true
+    environment:
+      NODE_ENV: production
+      PORT: "4100"
+      UPLOAD_DIR: /app/uploads
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:?}
+      DB_USER: ${DB_USER:?}
+    secrets: [db_password]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, edge]             # `edge` is the only route to the internet (SMSlenz, SMTP)
+    ports:
+      - "${BACKEND_BIND:-127.0.0.1:14100}:4100"   # default host port is a PLACEHOLDER: confirm it is free on the VPS
+    volumes:
+      - uploads:/app/uploads
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    mem_limit: ${BACKEND_MEM_LIMIT:-512m}
+    cpus: ${BACKEND_CPUS:-1.0}
+    healthcheck:
+      # /health is outside the API prefix. The header satisfies FORCE_HTTPS=true (the app redirects plain-HTTP requests).
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4100/health',{headers:{'x-forwarded-proto':'https'},redirect:'manual'}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------------------------------------------------------------------
+  web:
+    <<: *common
+    image: hexalyte/reseller-web:${APP_VERSION:?}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      target: runtime
+      args:
+        # No default on purpose: the final public API URL (including /api/v1) is an open decision. It is baked into the
+        # bundle and into the Content-Security-Policy `connect-src`.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set NEXT_PUBLIC_API_URL in compose.env}
+    networks: [edge]
+    ports:
+      - "${WEB_BIND:-127.0.0.1:13000}:3000"       # default host port is a PLACEHOLDER: confirm it is free on the VPS
+    cap_drop: [ALL]
+    mem_limit: ${WEB_MEM_LIMIT:-512m}
+    cpus: ${WEB_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # One-shot jobs. They are NOT part of `up`: they only run when named explicitly with `run --rm` (profile "tools").
+  # Migrations are therefore never executed by starting or restarting the application.
+  migrate:
+    profiles: ["tools"]
+    image: hexalyte/reseller-tools:${APP_VERSION:?}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+      target: tools
+    environment: &tools-env
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:?}
+      DB_USER: ${DB_USER:?}
+    secrets: [db_password]
+    networks: [internal]                   # no route to the internet
+    depends_on:
+      db:
+        condition: service_healthy
+    # Default command is `prisma migrate status` (read-only). Apply with: run --rm migrate npx prisma migrate deploy
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  # Creates the first ADMIN. The password is read from a file mounted at run time (see docs/DEPLOYMENT.md), never from env.
+  admin-init:
+    profiles: ["tools"]
+    image: hexalyte/reseller-tools:${APP_VERSION:?}
+    environment:
+      <<: *tools-env
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Hexalyte Admin}
+      EXPECT_DB_HOST: db
+      # EXPECT_DB_NAME is deliberately NOT set here: pass it explicitly with `run -e EXPECT_DB_NAME=...` so it is an independent
+      # statement of the database you mean to change, not a copy of the configuration under test.
+    # No arguments = check-only. Writes happen only with the explicit flag: `run --rm admin-init npx tsx scripts/create-first-admin.ts --apply`
+    command: ["npx", "tsx", "scripts/create-first-admin.ts"]
+    secrets: [db_password]
+    networks: [internal]
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+networks:
+  internal:
+    internal: true                         # no outbound route; carries database traffic only
+  edge: {}
+
+volumes:
+  pgdata:
+    external: true
+    name: hexalyte_reseller_pgdata
+  uploads:
+    external: true
+    name: hexalyte_reseller_uploads
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
