@@ -27,3 +27,4 @@ apps/backend/scripts/verify-hierarchy-and-lifecycle.ts
 # Superseded working notes (findings fixed; contents folded into docs/). Not part of a release.
 AUDIT.md
 deploy/proposed-patches/
+*.tar
