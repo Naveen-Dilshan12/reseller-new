@@ -16,7 +16,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/backend/package.json apps/backend/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY apps/web apps/web
 WORKDIR /app/apps/web
 RUN npm run build
@@ -28,7 +28,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/backend/package.json apps/backend/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci --omit=dev --workspace apps/web
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --workspace apps/web
 COPY --from=build /app/apps/web/.next /app/apps/web/.next
 COPY --from=build /app/apps/web/public /app/apps/web/public
 COPY --from=build /app/apps/web/next.config.mjs /app/apps/web/next.config.mjs
